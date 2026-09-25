@@ -6,23 +6,23 @@
 --
 -- THE ROOT-LEVEL PROGRAM A USER RUNS.
 --
--- `require`-able modules live under nbs/ and player/; THIS file is the entry
--- point the player types, and it is deliberately tiny: it hands control to
--- player/tui.lua and reports the resulting exit code to whoever ran it.
+-- The hand-written terminal UI (the old player/tui.lua) has been RETIRED.  The
+-- interactive experience is now the Basalt 2 screen in ui/basalt_app.lua, and
+-- this file exists only to be the stable entry point that hands over to it and
+-- reports the resulting exit code.
 --
 --   ccnbsplayer           -- run from CC:Tweaked (or `lua ccnbsplayer.lua`)
 --
--- The whole interactive experience -- listing songs, choosing one, printing the
--- load-time warnings, and the play/pause/stop transport -- lives in player/tui.lua
--- so it can be unit-tested with every seam injected.  This file exists only to
--- be that stable entry point.
+-- Basalt's run() blocks in its own event loop, so the whole screen -- the song
+-- list, the detail/attribution panel, the transport and the progress bar --
+-- lives in ui/basalt_app.lua, which is the ONLY view required here.
 --
 -- Compatibility: Lua 5.2 / CC:Tweaked Cobalt.  No integer division, no bitwise
 -- operators, no utf8.*, no collectgarbage, no string.dump, no os.exit.
 
-local tui = require("player.tui")
+local app = require("ui.basalt_app")
 
-local result = tui.run({})
+local result = app.run({})
 
 local exit_code = 0
 if type(result) == "table" and type(result.exit_code) == "number" then

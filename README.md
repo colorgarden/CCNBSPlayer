@@ -50,6 +50,45 @@ wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installe
 安装器会把运行所需的全部文件下载并放到 `/lib/` 下。成功后终端会打印一段中文横幅，并告诉
 你用法。安装器是**幂等**的：重复运行会干净地覆盖旧文件，不会破坏既有安装。
 
+### 网络不好 / `raw.githubusercontent.com` 连不上（镜像源）
+
+安装器**默认会自动切换镜像源**，你什么都不用做。它按顺序尝试以下来源，**用第一个能答上
+的来源完成整次安装**（不会东拼一点西拼一点）：
+
+| 顺序 | 名称 | 地址 |
+|---|---|---|
+| 1 | `github` | `raw.githubusercontent.com`（官方，**始终最先尝试**） |
+| 2 | `ghproxy` | `ghproxy.net` |
+| 3 | `ghfast` | `ghfast.top` |
+| 4 | `gh-proxy` | `gh-proxy.com` |
+| 5 | `hkproxy` | `hk.gh-proxy.com` |
+| 6 | `llkk` | `gh.llkk.cc` |
+| 7 | `jsdelivr` | `cdn.jsdelivr.net`（**放最后，因为它有缓存**） |
+
+能直连 GitHub 的机器**行为和以前完全一样**，永远用不到镜像，因为官方地址排第一。
+
+**为什么 jsDelivr 排最后**：它是唯一**会缓存**的来源——按分支缓存，可能长达数小时。刚推
+的提交在它上面可能还看不到，过期的清单会让你装到旧文件列表，所以只当最后手段。
+
+需要手动控制时：
+
+```text
+wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua --list-mirrors
+wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua --mirror ghfast
+wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua --mirror https://自定义镜像/前缀
+wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua --no-mirror
+```
+
+| 参数 | 作用 |
+|---|---|
+| `--list-mirrors` | 列出所有可用来源后退出，不做安装 |
+| `--mirror <名称>` | **只用**该来源，不再自动回退 |
+| `--mirror <地址>` | 只用该地址（同样不回退） |
+| `--no-mirror` | 只用 GitHub 官方地址，完全不碰镜像 |
+
+> `--mirror` 是「只用它」而不是「优先它」：指定后若该来源不通，会直接失败而不会偷偷换源，
+> 这样你才能确定文件到底从哪来。
+
 ### 方式二：手动复制（无 HTTP 时）
 
 把仓库里这些文件按原目录结构复制到电脑的 `/lib/`：
@@ -57,11 +96,18 @@ wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installe
 ```text
 /lib/ccnbs.lua            （库入口）
 /lib/ccnbsplayer.lua      （交互播放器）
+/lib/updater.lua          （更新器）
 /lib/nbs/*.lua            （10 个解码/分析模块）
-/lib/player/*.lua         （10 个运行时/界面模块）
+/lib/player/*.lua         （9 个运行时模块）
+/lib/net/*.lua            （3 个网络模块）
+/lib/ui/*.lua             （4 个界面模块）
+/lib/vendor/*.lua         （2 个第三方库，见「许可证」）
 ```
 
-共 22 个文件。复制完成后即可直接使用。
+共 31 个文件。复制完成后即可直接使用。
+
+> `vendor/` 里是随仓库分发的第三方库（Basalt 2 与 utf8display），**必须一起复制**，否则
+> 播放器无法启动。字体**不在**其中，由程序在运行时自行下载（见下文「中文显示」）。
 
 ### 安装位置与 `require` 解析规则（重要）
 
@@ -100,41 +146,69 @@ lib/ccnbsplayer
 把 `.nbs` 文件放到播放器的**当前工作目录**（例如默认的 `/`，或你 `cd` 进去的目录）。
 播放器只在**当前目录**里找 `.nbs`，不会递归子目录。
 
+### 更新
+
+装上以后再想更新，运行**更新器**即可，不需要再记 `wget` 地址：
+
+```text
+/lib/updater
+```
+
+它会读取本机已安装的版本、从仓库读取版本，**只有仓库更新时才重新安装**；已经是最新则什么都
+不做，也**不会下载任何文件**。更新器完全复用安装器的逻辑（同一份镜像链、同一份清单、同一
+个写入器），因此「更新」和「安装」不可能得出不同结果。
+
+```text
+/lib/updater --check          # 只报告有没有新版本，不做任何改动
+/lib/updater --mirror ghfast  # 只用一个来源
+/lib/updater --no-mirror      # 只用 GitHub 官方地址
+/lib/updater --list-mirrors   # 列出可用来源
+```
+
+版本号只有**一个来源**：`installer.lua` 里的 `installer.VERSION`。更新器是去抓**远端
+`installer.lua` 源码**并把这一行解析出来比较的，而不是另外维护一个 `version` 文件——多一个
+版本文件就多一处会过期的地方，而过期的版本号会让更新器自信地给出错误结论。测试里有一条断言
+专门锁住这件事：解析安装在机器上的 `installer.lua` 得到的版本，必须等于它自己报告的版本。
+
+版本比较是**按数字**而不是按字符串，所以 `1.10.0` 正确地**新于** `1.9.0`。如果你装的是比仓
+库**更超前**的本地/开发构建，更新器会识别出来并**拒绝降级**，什么都不改。
+
 ### 传输键
 
-启动后播放器会列出当前目录下的歌曲，用方向键选择：
+启动后播放器会列出当前目录下的歌曲：
 
 | 操作 | 按键 |
 |---|---|
-| 选择上一首 / 下一首 | ↑ / ↓ |
-| 开始播放选中的歌曲 | Enter / 空格 |
-| 取消选择并退出列表 | `q` / `Esc` |
-
-播放开始之后：
-
-| 操作 | 按键 |
-|---|---|
-| 暂停 / 继续 | 空格 或 `p` |
+| 上一首 / 下一首 | ↑ / ← / ↓ / → |
+| 载入选中的歌曲 | `Enter` |
+| 播放 / 暂停 / 继续 | 空格 或 `p` |
 | 停止 | `s` 或 `q` |
+| 切换中/英文界面 | `l` |
+| 退出播放器 | `Esc` |
 
-> 左右方向键（以及 `a` / `d`）在播放阶段是空操作。v1 **不支持**跳转进度（seek）与
-> 循环播放。
+> v1 **不支持**跳转进度（seek）与循环播放。
 
-### 进度显示
+### 界面与中文显示
 
-播放前先打印一行曲目信息，形如：
+界面基于 **Basalt 2**（随仓库分发，见 [`vendor/`](vendor/)）。Basalt 的文字元素**无法显示
+中文**——它用的是 CC 自带终端字体，没有中文字形。所以中文是这样显示出来的：用 `ui/cjk.lua`
+把文字转成像素点阵（bimg），再喂给 Basalt 的图像元素。
 
-```text
-曲目 <曲名>：音符 <总数>，峰值并发 <峰值>，tick_ms <节拍毫秒>
-```
+这意味着**中文需要一份 CJK 像素字体**，而这份字体：
 
-播放过程中每敲一个音符打印一行进度：
+- **不随仓库分发**，由 `ui/cjk.lua` 在**运行时下载**到你的电脑上；
+- 默认用 **8px** 字体（1,681,325 字节，约占 6 MB 内存），因为它比 12px 小一半以上；
+- **默认每次启动都会重新下载**。原因是 CC:Tweaked 电脑默认磁盘上限是 **1,000,000 字节**，
+  而 8px 字体就有 1.68 MB，**装不下**，所以缓存写入会失败。
 
-```text
-进度 <已播放数>/<总数>
-```
+程序会**先尝试缓存**，缓存失败**不影响使用**（只是下次启动要重下），并且会在界面里告诉你
+当前是不是走的缓存。
 
-暂停时打印 `已暂停。`，继续时打印 `继续播放。`，停止时打印 `已停止。`。
+**想避免每次重下**：把服务器的 `computer_space_limit` 调大到 2 MB 以上，字体就能被缓存下来，
+之后启动不再下载。这是可选的优化，不做也完全能用。
+
+**拿不到字体时**：界面**自动退回 ASCII/英文**，程序照常可用——中文失败只让你损失中文，不会
+让你用不了程序。
 
 ### 扬声器数量要求
 
@@ -255,5 +329,14 @@ ccnbs.play(events, { analysis = analysis })   -- 播放已编排好的计划
 本项目以 **GNU 通用公共许可证第 2 版（GPL-2.0）** 发布，完整条款见
 [`LICENSE`](LICENSE)。第三方组件及其归属信息见 [`NOTICE`](NOTICE)。
 
-本项目的全部实现均为从零编写，**不含任何第三方代码**。`NOTICE` 中列出的 `.nbs` 测试
-素材属于各自独立的第三方作品，仍按其原有许可证（MIT）授权，不适用本项目的 GPL-2.0。
+**本项目包含第三方代码。** 用户界面基于 **Basalt 2**（MIT），中文渲染使用
+**utf8display**（自身未声明许可证，经 **MPlayer**（GPL-2.0）分发），两者都**随仓库
+分发**在 [`vendor/`](vendor/) 目录下，来源、固定版本与重新构建方法见
+[`vendor/README.md`](vendor/README.md)。之所以是随仓库分发而非运行时下载，是因为 Basalt
+内部模块之间用 `require` 互相引用，散放文件时无法解析。
+
+**字体不属于仓库内容**：CJK 像素字体由 `ui/cjk.lua` 在运行时下载到用户的电脑上（原因见
+下文「中文显示」），这与 MPlayer 的做法一致。
+
+`.nbs` 测试素材属于各自独立的第三方作品，仍按其原有许可证（MIT）授权，不适用本项目的
+GPL-2.0；它们不随仓库分发。
