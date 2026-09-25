@@ -3,7 +3,12 @@ NOTICE
 
 CCNBSPlayer
 Copyright (c) 2026 colorgarden
-Licensed under the MIT License (see LICENSE).
+This project's own code is licensed under the GNU General Public License,
+version 2 (GPL-2.0, not "or later"). See LICENSE.
+
+The third-party `.nbs` test fixtures listed under "Third-party components"
+below are separate works; they are NOT covered by this project's GPL-2.0
+license and remain under their own licenses as stated there.
 
 This project is an independent, from-scratch implementation. It is not
 affiliated with, endorsed by, or sponsored by Open Note Block Studio,

@@ -252,6 +252,8 @@ ccnbs.play(events, { analysis = analysis })   -- 播放已编排好的计划
 
 ## 许可证
 
-本项目以 **MIT** 许可证发布，见 [`LICENSE`](LICENSE)。归属信息见 [`NOTICE`](NOTICE)。
+本项目以 **GNU 通用公共许可证第 2 版（GPL-2.0）** 发布，完整条款见
+[`LICENSE`](LICENSE)。第三方组件及其归属信息见 [`NOTICE`](NOTICE)。
 
-本项目的全部实现均为从零编写，**不含任何第三方代码**。
+本项目的全部实现均为从零编写，**不含任何第三方代码**。`NOTICE` 中列出的 `.nbs` 测试
+素材属于各自独立的第三方作品，仍按其原有许可证（MIT）授权，不适用本项目的 GPL-2.0。

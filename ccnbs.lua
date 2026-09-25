@@ -1,3 +1,7 @@
+-- SPDX-License-Identifier: GPL-2.0-only
+-- Copyright (C) 2026 colorgarden
+-- Part of CCNBSPlayer. Licensed under GPL-2.0; see LICENSE.
+--
 -- ccnbs.lua
 --
 -- THE PUBLIC LIBRARY MODULE -- the single entry point other people's scripts
