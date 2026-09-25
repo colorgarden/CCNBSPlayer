@@ -82,7 +82,12 @@ local function encode(code_point)
   end
 end
 
--- byte_to_utf8(b) -> UTF-8 string for a single CP1252 byte value 0..255.
+-- byte_to_utf8(byte) -> UTF-8 string for a single CP1252 byte value 0..255.
+--
+-- PUBLIC HELPER, NOT DEAD CODE.  to_display() below is the production caller
+-- (it encodes each stored byte through this), and the function is exported so
+-- a caller that needs only one byte -- e.g. a single-character preview -- can
+-- use it directly.  tests/nbs/cp1252_spec.lua pins its output byte-for-byte.
 function cp1252.byte_to_utf8(byte)
   if type(byte) ~= "number" then
     error("cp1252.byte_to_utf8: expected a number, got " .. type(byte), 2)

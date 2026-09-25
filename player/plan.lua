@@ -33,7 +33,12 @@
 --
 --     (tick_index, layer_index, note_index)
 --
--- There is NO other tiebreaker and NO reliance on the input array's order.
+-- note_index is the THIRD and final key.  It is NOT a globally unique id: it is
+-- a 1-based position WITHIN each (tick_index, layer_index) group (see below), so
+-- it is exactly the field through which the caller's input array order reaches
+-- the output.  Two notes in the SAME (tick, layer) group are ordered by the
+-- order they appear in `song.notes`; the planner does NOT re-order within a
+-- group.  For two notes in DIFFERENT groups the input order is irrelevant.
 -- The sort is performed with an EXPLICIT comparison function (see less_event):
 -- do NOT "optimise" it away on the assumption that the input is pre-sorted, and
 -- do NOT sort by t_ms alone (t_ms is a function of tick_index, so it adds no
@@ -43,20 +48,25 @@
 -- The Tier-2 integration tests assert on the ORDERED sequence of speaker calls
 -- the plan produces.  That comparison is only meaningful because this module
 -- fixes the order deterministically.  Introducing any dependence on a hash-table
--- iteration order (`pairs`), on the clock, or on the order of `song.notes` as
--- handed in would make those integration assertions flaky.  This module must
--- stay a pure, total, deterministic function: no clock, no peripherals, no I/O,
--- no globals, no mutation of its inputs.  Calling plan(song, analysis) twice
--- must give byte-identical output.
+-- iteration order (`pairs`) or on the clock would make those integration
+-- assertions flaky.  The input array's order is DELIBERATELY significant for
+-- note_index WITHIN a (tick, layer) group, but it must be read from the array
+-- POSITIONS -- never from an unordered table walk.  This module must stay a
+-- pure, total, deterministic function: no clock, no peripherals, no I/O, no
+-- globals, no mutation of its inputs.  Calling plan(song, analysis) twice on the
+-- SAME input array must give byte-identical output.
 --
 -- HOW note_index IS COMPUTED
 --   A note_index belongs to a (tick, layer) GROUP and restarts at 1 for each new
 --   group.  This module builds an orderable list of the input notes keyed by
 --   (tick, layer, position-in-input), sorts THAT list once, and then walks it in
 --   order, incrementing a counter while consecutive entries share the same
---   (tick, layer) and resetting it to 1 otherwise.  The input position is used
---   only as the tiebreak for notes already in the same file group -- it never
---   leaks into the emitted order, which is re-sorted on the frozen tuple below.
+--   (tick, layer) and resetting it to 1 otherwise.  The input position is the
+--   tiebreak for notes already in the same (tick, layer) group, and because that
+--   position becomes note_index -- the third sort key -- it DOES determine the
+--   emitted order of same-group notes.  The planner never re-orders inside a
+--   group; a caller that wants a specific within-group order must supply it in
+--   `song.notes`.
 --
 -- t_ms IS DERIVED, NEVER ACCUMULATED
 --   t_ms = tick_index * analysis.tick_ms is computed per event from the note's
