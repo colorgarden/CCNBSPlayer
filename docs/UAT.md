@@ -1,8 +1,8 @@
 # 游戏内验收测试（UAT）
 
 > 这是 **Tier-3 验收工件**：它不属于自动化测试门，而是由**项目所有者**在**真实
-> Minecraft + CC:Tweaked** 环境里亲自执行的步骤清单。自动化测试（Tier-1 单元测试 +
-> Tier-2 CraftOS-PC 无头集成）见 `README.md` 的「测试」一节。
+> Minecraft + CC:Tweaked** 环境里亲自执行的步骤清单。公开文档只覆盖安装与使用；
+> 自动化测试属于本地测试套件，不在本文档范围内。
 >
 > 目标：用不读源码也能照做的步骤，验证「解码 → 分析 → 调度音符 → 扬声器发声」这条
 > 真实链路，并覆盖模拟器覆盖不到的两件事：**真实硬件的越界音高**与**扩展音域材质包**。
@@ -17,7 +17,7 @@
 |---|---|
 | 一台 CC:Tweaked 电脑 | 任意等级（普通 / 高级 / 命令电脑均可） |
 | 至少一个 `speaker` 外设 | 贴在电脑任意一侧（如 `back`），用 `peripheral.getNames()` 能看到它 |
-| 一个 `.nbs` 歌曲文件 | 放进电脑的当前目录；可先用仓库自带的 `tests/fixtures/` 里的样本 |
+| 一个 `.nbs` 歌曲文件 | 放进电脑的当前目录，由你自己准备 |
 | 可选：多个 `speaker` | 用于 §5 的多扬声器步骤 |
 | 可选：扩展音域材质包 | 用于 §4；这是社区资源包，由你自行获取，本项目不提供、不自动安装 |
 
@@ -111,9 +111,9 @@ INGAME warncode=<code>                ← 每个警告码再单独一行；没�
 自洽：`warnings=0` 时**不出现**任何 `warn=` / `warncode=` 行；一旦出现 `warn=` 行，
 `warnings` 必然 `≥ 1`。
 
-例如 §3 用的 `compat_demo_song.nbs`（峰值 `3`、`tick_ms=100`、音符全在原生音域内）
-**不产生任何警告**，因此结尾打印 `warnings=0`，且**没有** `INGAME warn=` 行。若换成含
-越界音符的 `simple.nbs`，则会多出 `warnings=1` 与一行
+例如一首峰值并发不超过单扬声器上限、`tick_ms` 不细于 50 ms、且音符全在原生音域内的曲子
+**不产生任何警告**，因此结尾打印 `warnings=0`，且**没有** `INGAME warn=` 行。若换成一首
+含越界音符的曲子，则会多出 `warnings=1` 与一行
 `INGAME warn=WARN[extended-range] ...`（见 §4）。
 
 **PASS 判据**
@@ -135,12 +135,11 @@ INGAME warncode=<code>                ← 每个警告码再单独一行；没�
 
 **步骤**
 
-1. 选一首**所有音符都落在原生两个八度内**的曲子（NBS key 33..57）。仓库自带的
-   `tests/fixtures/compat_demo_song.nbs` 满足此条件。
+1. 选一首**所有音符都落在原生两个八度内**的曲子（NBS key 33..57），由你自己提供。
 2. 运行：
 
    ```text
-   ingame.lua /compat_demo_song.nbs
+   ingame.lua /我的歌.nbs
    ```
 
 **PASS 判据**
@@ -170,12 +169,11 @@ INGAME warncode=<code>                ← 每个警告码再单独一行；没�
 
 **步骤**
 
-1. 选一首**含越界音符**的曲子（`tests/fixtures/simple.nbs` 含 key 27/29/32 等
-   低于 33 的音符）。
+1. 选一首**含越界音符**的曲子（例如含有 key 低于 33 的音符），由你自己准备。
 2. **先不装材质包**运行：
 
    ```text
-   ingame.lua /simple.nbs
+   ingame.lua /我的歌.nbs
    ```
 
    **PASS 判据（警告出现）**：终端出现一次

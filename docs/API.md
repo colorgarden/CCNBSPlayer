@@ -114,17 +114,21 @@ ccnbs.play(events, { analysis = analysis })   -- 播放已编排好的计划
 
 ## 完整可运行示例
 
-下面的示例被测试套件**实际执行**（`tests/api_spec.lua` 会从本文档抽取
-`lua` 围栏代码块并运行），因此它不会随接口演进而失效。样例文件
-`tests/fixtures/simple.nbs` 随仓库提供；换成你自己的 `.nbs` 路径即可。
+下面的示例演示完整的「解码 → 注入接缝 → 播放 → 推进时钟」流程。请把示例里的
+`my_song.nbs`（位于当前目录）**替换成你自己的歌曲文件**；该文件不存在时，示例会打印
+一句提示后直接跳过，不会报错。
 
 ```lua
 local ccnbs = require("ccnbs")
 local clock = require("player.clock")
 local speaker = require("player.speaker")
 
--- 1) 读取并解码一个 .nbs 文件
-local file = assert(io.open("tests/fixtures/simple.nbs", "rb"))
+-- 1) 读取并解码一个 .nbs 文件（把 "my_song.nbs" 替换成你自己的歌曲文件）
+local file = io.open("my_song.nbs", "rb")
+if file == nil then
+  print("未找到 my_song.nbs，请替换成你自己的歌曲文件后再运行本示例。")
+  return
+end
 local bytes = file:read("*a")
 file:close()
 
@@ -160,14 +164,20 @@ end
 
 `ccnbs.plan` 与 `ccnbs.play` 分离的意义，是让调用方**编排一次、播放一个计划**。
 播放计划时把与之匹配的分析经 `opts.analysis` 传入即可；行为与播放歌曲完全一致。
-下面的示例同样被测试套件**实际执行**：
+下面的示例同样演示「编排一次、播放一个计划」的流程（同样请把 `my_song.nbs` 换成你自己
+的歌曲文件）：
 
 ```lua
 local ccnbs = require("ccnbs")
 local clock = require("player.clock")
 local speaker = require("player.speaker")
 
-local file = assert(io.open("tests/fixtures/simple.nbs", "rb"))
+-- 把 "my_song.nbs" 替换成你自己的歌曲文件
+local file = io.open("my_song.nbs", "rb")
+if file == nil then
+  print("未找到 my_song.nbs，请替换成你自己的歌曲文件后再运行本示例。")
+  return
+end
 local bytes = file:read("*a")
 file:close()
 

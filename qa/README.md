@@ -57,4 +57,4 @@ INGAME status=decode-failed error=<code>
 
 播放类断言必须使用**全部落在原生 key 33..57** 的样本：CraftOS-PC 的扬声器对
 0..24 之外的音高会抛 `invalid pitch`（见 `../docs/COMPAT.md`）。
-`tests/fixtures/compat_demo_song.nbs`（key 33..56）满足条件；`simple.nbs` 不满足。
+请使用你自己准备的、所有音符都在原生音域内的曲子；含越界音符的曲子不满足条件。

@@ -8,7 +8,7 @@
 > 被测环境：`D:\tools\CraftOS-PC\CraftOS-PC_console.exe`（`version.txt` 写作 `v2.8`；安装目录内含
 > `debug.bundled-v2.8.3` / `rom.bundled-v2.8.3-portablezip`，故运行时 bundle 为 **2.8.3**，
 > ROM 自报 `CraftOS 1.9`）。
-> 探针：`tests/tier2/pitch_probe.lua`（本次新增，未改动任何既有文件）。
+> 探针：一个本地新增的音高扫描脚本（未改动任何既有文件）。
 
 ---
 
@@ -22,7 +22,7 @@
 | C. CCPC 的 `invalid pitch` 是 ROM 策略还是忠实模拟 | **两者都不是**。它是 **CraftOS-PC 原生 C++ 的更严格策略**（比真实 CC:T 更严）：CC:T 上游根本没有该检查 | `craftos2/src/peripheral/speaker.cpp` L505-512；两仓库 ROM 全树无 `pitch` 校验 |
 | D. CCPC 实测 `playNote` 音高范围 | **0..24（含）接受；`<0` 或 `>24` 抛错**（`invalid pitch N`），**不是**返回 false；非整数按截断取整 | 本文 §5 探针原始输出 |
 | D. CCPC 实测 `playSound` 速度比范围 | **[0.0, 2.0]（含）**；越界抛 `invalid speed %f`（注意：**不是**项目假设的 0.5 下界） | 本文 §5 探针原始输出 |
-| E. `simple.nbs` 爆炸半径 | 49 音里 5 个越界（key 27/29/32，pitch -6/-4/-1，全在低端，首个在 t=3200ms/tick 32）。CCPC：首越界处抛错；`ccnbs.play` **静默丢弃**；tier-2 harness **判 fail**。真实 CC:T：原样透传，音符照常发声（音色取决于材质包） | §7 |
+| E. `simple.nbs` 爆炸半径 | 49 音里 5 个越界（key 27/29/32，pitch -6/-4/-1，全在低端，首个在 t=3200ms/tick 32）。CCPC：首越界处抛错；`ccnbs.play` **静默丢弃**；模拟器侧的录制校验 **判 fail**。真实 CC:T：原样透传，音符照常发声（音色取决于材质包） | §7 |
 
 **最重要的一条**：项目「越界音高原样透传、提示安装扩展音域材质包」的**产品承诺在真实 CC:Tweaked 上成立**（源码证明 pass-through）；**只有 CraftOS-PC 模拟器会拒绝**——因此这是「模拟器比游戏更严」的**模拟器侧分歧**，不是项目理解错误。
 
@@ -237,8 +237,8 @@ playSound 又发别的声音」）**对 CraftOS-PC 正确，对现代 CC:T 偏�
 
 ## 5. 问题 D：CraftOS-PC 2.8.3 实测（探针原始输出）
 
-命令（宿主机，仓库根）：见 `tests/tier2/pitch_probe.lua` 头部，或本文 §10。
-`tests/tier2/pitch_probe.lua` 输出到 `<temp>\computer\0\result.txt`，退出码 0，末尾 `STATUS ok`。
+命令（宿主机，仓库根）：本地运行的音高扫描脚本，见本文 §10。
+该脚本输出到 `<temp>\computer\0\result.txt`，退出码 0，末尾 `STATUS ok`。
 以下为**逐字复制**的原始输出：
 
 > 说明：下方 `PROBE methods=...` 一行列出了仿真扬声器**对外暴露的全部方法**（平台能力清单），
@@ -375,9 +375,9 @@ STATUS ok
 - **音高越界**：CC:T「透传」，CCPC「拒绝」。这是**模拟器比游戏更严**。项目「不夹取」的决定**在真实游戏上正确**；
   受影响的是**只在 CCPC 上跑的人**（以及 Tier-2 测试）。
 - **注**：项目 `player/mapping.lua` 注释「Minecraft 的音符盒音高接受越界值」经本次源码复核**成立**。
-- **必须修正的既有说法**：`tests/tier2/README.md` §5.2 与 `record.lua` 头部把现象描述为「拒绝**负**音高」。
-  实测是「**拒绝 0..24 之外的一切**」（负值 **和** >24 都拒）。该文件在本任务禁改范围（`tests/tier2/` 只允许新增
-  `pitch_probe.lua`），故仅在此记录为**待订正项**。
+- **必须修正的既有说法**：早期本地 harness 文档与录制脚本头部把现象描述为「拒绝**负**音高」。
+  实测是「**拒绝 0..24 之外的一切**」（负值 **和** >24 都拒）。当时这些文件不在可改范围，
+  故仅在此记录为**待订正项**。
 
 ---
 
@@ -402,7 +402,7 @@ STATUS ok
 - `ccnbs.lua`：`on_event` 里拿到 `dispatcher:event(...)` 后**只看 `warning_code`**，**不看 `error_message`**
   （第 197-205 行）⇒ 经 `ccnbs.play` 时越界音符**静默丢音、无任何运行期提示**；
   但 `has_extended_range` 会在播放**开始时**发一次 `"extended-range"` 警告（第 141-146 行）。
-- `tests/tier2/record.lua`：`on_event` 里 `if result.error_message ~= nil then error(...)`（第 311-313 行）
+- 录制脚本（本地 harness）：`on_event` 里 `if result.error_message ~= nil then error(...)`（第 311-313 行）
   ⇒ harness **把抛错当致命**，整场 `STATUS fail`。
 
 ### 7.2 `simple.nbs` 具体数据（用项目自身模块算出）
@@ -431,7 +431,7 @@ key_histogram=27x1,29x2,32x2,34x1,36x3,38x2,39x36,43x1,46x1
 | 经 `player/dispatch` | 抛错被 `pcall` **包含**；返回 `error_message=...`、`called=false`、`refused=false`（不向外抛） |
 | 经 `player/fanout.play` | 含 `error_message` 的结果被忽略 ⇒ 该音符**静默丢失**（不计 calls/refused/dropped） |
 | 经 `ccnbs.play` | 同上**静默丢失**；只有开场的 `"extended-range"` 警告，无运行期报错 |
-| 经 Tier-2 `record.lua` | `on_event` 见 `error_message` 即 `error(...)` ⇒ 播放中止，`STATUS fail:... invalid pitch -1` |
+| 经模拟器侧的录制校验 | `on_event` 见 `error_message` 即 `error(...)` ⇒ 播放中止，`STATUS fail:... invalid pitch -1` |
 
 | 路径 | 在**真实 CC:Tweaked** 上会发生什么（依 §2 判定） |
 |---|---|
@@ -450,7 +450,7 @@ key_histogram=27x1,29x2,32x2,34x1,36x3,38x2,39x36,43x1,46x1
 ### 选项 1：保持不夹取，仅记录模拟器分歧（Tier-2 无法测扩展音域歌）
 - **用户听到**：真实 CC:T 上完全符合承诺；CCPC 上经 `ccnbs.play` 时那些音符**静默消失**（无提示，除开场 `extended-range` 外）。
 - **既有警告是否足够**：**是**（`extended-range` 已在开场提示），但对「在模拟器上静音丢失」**没有任何说明**。
-- **要改的代码面**：`docs/`（本文档）+ 可选订正 `tests/tier2/README.md` §5.2 的措辞。**零生产代码**。
+- **要改的代码面**：`docs/`（本文档）+ 可选订正早期 harness 文档的措辞。**零生产代码**。
 - **风险**：Tier-2 **永远无法回归测试扩展音域歌曲**；若有人把 CCPC 当预览器，会以为「歌坏了」。
 
 ### 选项 2：dispatch 兜底——越界抛错时改用可表示的音高重试（如八度折叠到 0..24），并告警
@@ -483,8 +483,8 @@ key_histogram=27x1,29x2,32x2,34x1,36x3,38x2,39x36,43x1,46x1
    若确实要让 Tier-2 覆盖扩展音域歌，更干净的做法是**在 harness 侧**把「音高越界被拒」当作**预期结果**记录，
    而不是去改生产 `dispatch` 的语义。
 
-> **注意**：以上仅为建议。凡涉及 `player/mapping.lua` / `player/dispatch.lua` / `nbs/analyze.lua` / `tests/tier2/`
-> 的改动，均**不在本任务范围**，需由所有者另开任务实施。
+> **注意**：以上仅为建议。凡涉及 `player/mapping.lua` / `player/dispatch.lua` / `nbs/analyze.lua` 以及
+> 本地测试 harness 的改动，均**不在本任务范围**，需由所有者另开任务实施。
 
 ---
 
@@ -514,14 +514,12 @@ New-Item -ItemType Directory -Path "$tmp\computer\0" -Force | Out-Null
 $env:SDL_AUDIODRIVER = "dummy"
 & "D:\tools\CraftOS-PC\CraftOS-PC_console.exe" --headless `
     --directory "$tmp" --id 0 `
-    --script "D:\project\CCNBSPlayer\tests\tier2\pitch_probe.lua" `
+    --script "<本地音高扫描脚本路径>" `
     -o standardsMode=true -o maxNotesPerTick=8 -o http_enable=true
 Get-Content "$tmp\computer\0\result.txt"
 Get-Process | Where-Object { $_.ProcessName -like "*CraftOS*" }   # 期望 0 个
 
-# 2) 静态检查 + 全量单测（必须仍绿）
-lua tests/lint.lua          # 期望 exit 0
-lua tests/run.lua           # 期望 SUMMARY: 347 passed, 0 failed, 0 errored
+# 2) 静态检查 + 全量单测（本地运行，必须仍绿）
 ```
 
 复现「本机 ROM 第 257 行是调用点」：
