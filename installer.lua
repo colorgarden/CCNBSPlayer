@@ -6,9 +6,10 @@
 --
 --     wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua
 --
--- It downloads the runtime files (the `nbs/`, `player/`, `net/` and `ui/`
--- modules plus the root `ccnbs.lua` / `ccnbsplayer.lua` entry programs) from
--- the repository and places them so `require` resolves them afterwards.
+-- It downloads the runtime files (the `nbs/`, `player/`, `net/`, `ui/` and
+-- `vendor/` modules plus the root `ccnbs.lua` / `ccnbsplayer.lua` entry
+-- programs) from the repository and places them so `require` resolves them
+-- afterwards.
 --
 -- ===========================================================================
 -- THE INSTALL ROOT: /lib/ -- AND WHY IT IS THE RIGHT CHOICE
@@ -28,10 +29,11 @@
 --
 --     /lib/ccnbs.lua            require("ccnbs")
 --     /lib/ccnbsplayer.lua      the program the user runs
---     /lib/nbs/*.lua            require("nbs.decode")  ...
---     /lib/player/*.lua         require("player.tui")  ...
---     /lib/net/*.lua            require("net.http")    ...
---     /lib/ui/*.lua             require("ui.i18n")     ...
+--     /lib/nbs/*.lua            require("nbs.decode")     ...
+--     /lib/player/*.lua         require("player.runtime") ...
+--     /lib/net/*.lua            require("net.http")       ...
+--     /lib/ui/*.lua             require("ui.basalt_app")  ...
+--     /lib/vendor/*.lua         vendored Basalt / CJK bundles (loaded by the UI)
 --
 -- A program run as `/lib/ccnbsplayer` has dir == "/lib", so every nested
 -- require resolves inside `/lib`.  A user's own script elsewhere can opt in
@@ -115,6 +117,34 @@ installer.MANIFEST_NAME = "installer.manifest"
 installer.DEFAULT_BASE_URL =
   "https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main"
 
+-- MIRROR SOURCES, tried IN ORDER.  `raw.githubusercontent.com` is frequently
+-- unreachable from mainland China, so the installer can obtain the repository
+-- through a mirror instead.
+--
+-- Every entry is a COMPLETE base URL, because file_url(base, path) simply
+-- appends "/" .. path.  That one shape covers both kinds of mirror: pass-through
+-- proxies that prefix the GitHub URL, and jsDelivr, which has its own
+-- /gh/<owner>/<repo>@<branch> layout.
+--
+-- The FIRST entry is canonical GitHub and is always tried first, so a host that
+-- can reach GitHub behaves EXACTLY as before and never touches a mirror.  The
+-- rest are tried only when the ones before them fail.  The whole install comes
+-- from whichever source answers first, never from a mixture.
+--
+-- jsDelivr is deliberately LAST because it is the only one that CACHES: it
+-- serves a branch's content from a CDN cache for hours, so a commit made minutes
+-- ago may not be visible through it.  A stale manifest would install an
+-- out-of-date file list, which is why it is a last resort and not a first choice.
+installer.MIRRORS = {
+  { name = "github",   base = installer.DEFAULT_BASE_URL },
+  { name = "ghproxy",  base = "https://ghproxy.net/" .. installer.DEFAULT_BASE_URL },
+  { name = "ghfast",   base = "https://ghfast.top/" .. installer.DEFAULT_BASE_URL },
+  { name = "gh-proxy", base = "https://gh-proxy.com/" .. installer.DEFAULT_BASE_URL },
+  { name = "hkproxy",  base = "https://hk.gh-proxy.com/" .. installer.DEFAULT_BASE_URL },
+  { name = "llkk",     base = "https://gh.llkk.cc/" .. installer.DEFAULT_BASE_URL },
+  { name = "jsdelivr", base = "https://cdn.jsdelivr.net/gh/colorgarden/CCNBSPlayer@main" },
+}
+
 -- How many times a single fetch is attempted before it is declared failed.
 installer.MAX_ATTEMPTS = 3
 
@@ -135,6 +165,7 @@ installer.SPACE_MARGIN = 2048
 installer.RUNTIME_FILES = {
   "ccnbs.lua",
   "ccnbsplayer.lua",
+  "updater.lua",
   "nbs/analyze.lua",
   "nbs/cp1252.lua",
   "nbs/decode.lua",
@@ -153,13 +184,16 @@ installer.RUNTIME_FILES = {
   "player/runtime.lua",
   "player/speaker.lua",
   "player/tempo.lua",
-  "player/tui.lua",
   "player/warnings.lua",
   "net/http.lua",
   "net/nbw.lua",
   "net/zip.lua",
+  "ui/basalt_app.lua",
+  "ui/cjk.lua",
   "ui/i18n.lua",
   "ui/presenter.lua",
+  "vendor/basalt.lua",
+  "vendor/utf8display.lua",
 }
 
 -- ---------------------------------------------------------------------------
@@ -209,6 +243,15 @@ local L10N = {
       "download attempt {attempt}/{max} failed, retrying: {url}",
     ["installer.manifest_fallback"] =
       "manifest unavailable; using the built-in file list.",
+    ["installer.mirror_try"] =
+      "trying source {name}: {base}",
+    ["installer.mirror_used"] =
+      "using mirror {name}.",
+    ["installer.mirror_next"] =
+      "{name} did not answer; trying the next source.",
+    ["installer.mirrors.title"] = "available sources (tried in this order):",
+    ["installer.mirrors.entry"] = "  {index}. {name}  {base}",
+    ["installer.banner.source"] = "downloaded from: {name}  ({base})",
     ["installer.banner.title"] = "========== CCNBSPlayer install complete ==========",
     ["installer.banner.version"] =
       "version: {version}  files installed: {installed}",
@@ -216,6 +259,7 @@ local L10N = {
     ["installer.banner.tip"] =
       "tip: put .nbs songs in the current directory, then pick one in the player.",
     ["installer.banner.footer"] = "===============================================",
+    ["installer.banner.update"] = "to update later, run:  /lib/updater",
     ["installer.usage.title"] = "CCNBSPlayer installer v{version}",
     ["installer.usage.syntax"] =
       "usage: wget run <script url> [base url] [result=<file>]",
@@ -223,6 +267,13 @@ local L10N = {
       "  - base url: overrides the default repository base ({default})",
     ["installer.usage.result"] =
       "  - result=: writes one install-result line to that file (headless acceptance)",
+    ["installer.usage.mirror"] =
+      "  - --mirror <name|url>: use ONLY that source (no automatic fallback); "
+      .. "names: {names}",
+    ["installer.usage.no_mirror"] =
+      "  - --no-mirror: use only the canonical GitHub address, never a mirror",
+    ["installer.usage.list_mirrors"] =
+      "  - --list-mirrors: list the available sources and exit",
     ["installer.usage.location"] = "install location: {root}",
   },
   zh = {
@@ -257,18 +308,29 @@ local L10N = {
       "下载第 {attempt}/{max} 次尝试失败，正在重试：{url}",
     ["installer.manifest_fallback"] =
       "无法获取清单文件，改用内置文件列表。",
+    ["installer.mirror_try"] = "正在尝试来源 {name}：{base}",
+    ["installer.mirror_used"] = "已使用镜像 {name}。",
+    ["installer.mirror_next"] = "{name} 无响应，尝试下一个来源。",
+    ["installer.mirrors.title"] = "可用来源（按此顺序依次尝试）：",
+    ["installer.mirrors.entry"] = "  {index}. {name}  {base}",
+    ["installer.banner.source"] = "下载来源：{name}（{base}）",
     ["installer.banner.title"] = "========== CCNBSPlayer 安装完成 ==========",
     ["installer.banner.version"] =
       "版本：{version}　已安装文件：{installed}",
     ["installer.banner.usage"] = "用法：在 shell 里输入  /lib/ccnbsplayer",
     ["installer.banner.tip"] = "提示：把 .nbs 歌曲放到当前目录，运行播放器后用它选择曲目。",
     ["installer.banner.footer"] = "==========================================",
+    ["installer.banner.update"] = "以后想更新：运行  /lib/updater",
     ["installer.usage.title"] = "CCNBSPlayer 安装器 v{version}",
     ["installer.usage.syntax"] = "用法：wget run <本脚本地址> [基础地址] [result=<结果文件>]",
     ["installer.usage.base"] =
       "  · 基础地址：覆盖默认仓库地址（默认 {default}）",
     ["installer.usage.result"] =
       "  · result=：把一行安装结果写入指定文件（用于无头验收）",
+    ["installer.usage.mirror"] =
+      "  · --mirror <名称|地址>：只用该来源，不再自动回退；可用名称：{names}",
+    ["installer.usage.no_mirror"] = "  · --no-mirror：只使用 GitHub 官方地址，不使用镜像",
+    ["installer.usage.list_mirrors"] = "  · --list-mirrors：列出所有可用来源后退出",
     ["installer.usage.location"] = "安装位置：{root}",
   },
 }
@@ -487,13 +549,24 @@ function installer.should_overwrite(kind)
   return "write"
 end
 
--- installer.parse_args(argv) -> { base, result_path, help }.
+-- installer.parse_args(argv) -> { base, mirror, no_mirror, list_mirrors,
+--                                  result_path, help }.
 --   * an argument containing "://" is the repository base URL
+--   * `--mirror <name|url>` forces ONE source (no automatic fallback)
+--   * `--no-mirror` restricts the install to the canonical GitHub address
+--   * `--list-mirrors` prints the sources and exits
 --   * `result=<path>` asks for a one-line harness result file
 --   * --help / -h / help prints usage
 -- Anything unrecognised is ignored.
 function installer.parse_args(argv)
-  local parsed = { base = nil, result_path = nil, help = false }
+  local parsed = {
+    base = nil,
+    mirror = nil,
+    no_mirror = false,
+    list_mirrors = false,
+    result_path = nil,
+    help = false,
+  }
   if type(argv) ~= "table" then
     return parsed
   end
@@ -502,6 +575,21 @@ function installer.parse_args(argv)
     if type(raw) == "string" then
       if raw == "--help" or raw == "-h" or raw == "help" then
         parsed.help = true
+      elseif raw == "--no-mirror" then
+        parsed.no_mirror = true
+      elseif raw == "--list-mirrors" then
+        parsed.list_mirrors = true
+      elseif raw == "--mirror" then
+        -- A separate token: the next argument is the name or URL.
+        local value = argv[index + 1]
+        if type(value) == "string" and value ~= "" then
+          parsed.mirror = value
+        end
+      elseif raw:sub(1, 9) == "--mirror=" then
+        local value = raw:sub(10)
+        if value ~= "" then
+          parsed.mirror = value
+        end
       elseif raw:sub(1, 7) == "result=" then
         parsed.result_path = raw:sub(8)
       elseif raw:find("://", 1, true) ~= nil then
@@ -510,6 +598,57 @@ function installer.parse_args(argv)
     end
   end
   return parsed
+end
+
+-- installer.find_mirror(name) -> the MIRRORS entry with that name, or nil.
+function installer.find_mirror(name)
+  if type(name) ~= "string" then
+    return nil
+  end
+  for index = 1, #installer.MIRRORS do
+    if installer.MIRRORS[index].name == name then
+      return installer.MIRRORS[index]
+    end
+  end
+  return nil
+end
+
+-- installer.sources_for(parsed) -> ordered array of { name, base }.
+--
+-- The one place that decides WHICH sources may be used and in what order:
+--   * `--mirror <name>`  -> exactly that mirror (by name from MIRRORS)
+--   * `--mirror <url>`   -> exactly that URL, named "custom"
+--   * `--no-mirror`      -> only the canonical GitHub address
+--   * default            -> every entry of MIRRORS, canonical first, so a host
+--     that can reach GitHub behaves as if mirrors did not exist
+-- An explicit `base` argument wins over all of it, because a caller that names
+-- a base url means exactly that base.
+function installer.sources_for(parsed)
+  if type(parsed) ~= "table" then
+    parsed = {}
+  end
+  if type(parsed.base) == "string" and parsed.base ~= "" then
+    return { { name = "custom", base = installer.normalize_base(parsed.base) } }
+  end
+  if type(parsed.mirror) == "string" and parsed.mirror ~= "" then
+    local known = installer.find_mirror(parsed.mirror)
+    if known ~= nil then
+      return { known }
+    end
+    if parsed.mirror:find("://", 1, true) ~= nil then
+      return { { name = "custom", base = installer.normalize_base(parsed.mirror) } }
+    end
+    -- An unknown NAME is meaningless; fall through to the default chain rather
+    -- than building a nonsense URL out of it.
+  end
+  if parsed.no_mirror then
+    return { { name = "github", base = installer.DEFAULT_BASE_URL } }
+  end
+  local sources = {}
+  for index = 1, #installer.MIRRORS do
+    sources[index] = installer.MIRRORS[index]
+  end
+  return sources
 end
 
 -- A one-line rendering of a possibly multi-line message.
@@ -547,8 +686,9 @@ function installer.fetch_with_retry(http, url, log)
 end
 
 -- installer.load_files(http, base, log) -> files, source.  Fetches and parses
--- the manifest; on any failure returns the built-in fallback list.  `source` is
--- "manifest" or "fallback".
+-- the manifest from ONE base; on any failure returns the built-in fallback list.
+-- `source` is "manifest" or "fallback".  Kept for single-source callers; the
+-- multi-source path used by install() is load_files_from below.
 function installer.load_files(http, base, log)
   local body = installer.fetch_with_retry(http, installer.manifest_url(base), log)
   if type(body) == "string" then
@@ -561,6 +701,48 @@ function installer.load_files(http, base, log)
     log(installer.tr("installer.manifest_fallback"))
   end
   return installer.RUNTIME_FILES, "fallback"
+end
+
+-- installer.load_files_from(sources, http, log) -> files, source, used.
+--
+-- Walks `sources` IN ORDER and stops at the first one that yields a usable
+-- manifest.  `used` is the source that answered, so every later download comes
+-- from the SAME host -- an install is never assembled from a mixture of mirrors,
+-- which would otherwise be a way to get inconsistent file sets.
+--
+-- `source` is "manifest" when a real manifest was read, or "fallback" when every
+-- source failed and the built-in list stands in; in the fallback case `used` is
+-- the FIRST source, because nothing answered and there is no better candidate.
+function installer.load_files_from(sources, http, log)
+  if type(sources) ~= "table" or #sources == 0 then
+    sources = { { name = "github", base = installer.DEFAULT_BASE_URL } }
+  end
+  local say = type(log) == "function" and log or function() end
+
+  for index = 1, #sources do
+    local candidate = sources[index]
+    say(installer.tr("installer.mirror_try",
+      { name = candidate.name, base = candidate.base }))
+
+    local body = installer.fetch_with_retry(
+      http, installer.manifest_url(candidate.base), log)
+    if type(body) == "string" then
+      local parsed = installer.parse_manifest(body)
+      if #parsed > 0 then
+        if index > 1 then
+          say(installer.tr("installer.mirror_used", { name = candidate.name }))
+        end
+        return parsed, "manifest", candidate
+      end
+    end
+
+    if index < #sources then
+      say(installer.tr("installer.mirror_next", { name = candidate.name }))
+    end
+  end
+
+  say(installer.tr("installer.manifest_fallback"))
+  return installer.RUNTIME_FILES, "fallback", sources[1]
 end
 
 -- installer.free_space(fs, path) -> number | nil.  nil means "unknown" (the
@@ -662,16 +844,28 @@ function installer.install(ioenv)
     error("installer.install: ioenv.fs is required", 2)
   end
 
+  -- WHICH SOURCES may be used, and in what order, is decided in ONE place.
+  -- `ioenv.sources` lets a caller pin the chain; an injected `ioenv.base` is the
+  -- older single-base contract and still wins, so existing callers are unaffected.
+  local sources = ioenv.sources
+  if type(sources) ~= "table" or #sources == 0 then
+    if type(ioenv.base) == "string" and ioenv.base ~= "" then
+      sources = { { name = "custom", base = installer.normalize_base(ioenv.base) } }
+    else
+      sources = installer.sources_for({})
+    end
+  end
+
   local log = ioenv.log
   if type(log) ~= "function" then
     log = function() end
   end
 
-  local base = installer.normalize_base(ioenv.base)
-
   -- The MANIFEST is the source of truth; the fallback only stands in when it
-  -- cannot be fetched.  `files` and `source` are recorded on the result.
-  local files, source = installer.load_files(http, base, log)
+  -- cannot be fetched from ANY source.  Every later download uses the SAME
+  -- source that answered, so an install is never a mixture of hosts.
+  local files, source, used = installer.load_files_from(sources, http, log)
+  local base = installer.normalize_base(used and used.base)
   local plan = installer.install_plan(base, files)
   local total = #plan
 
@@ -804,6 +998,8 @@ function installer.install(ioenv)
     installed = #written,
     total = total,
     source = source,
+    mirror = used and used.name or nil,
+    base = base,
     files = written,
   }
 end
@@ -867,7 +1063,32 @@ function installer.print_banner(env, result)
     { version = installer.VERSION, installed = tostring(result.installed or 0) }))
   log(installer.tr("installer.banner.usage"))
   log(installer.tr("installer.banner.tip"))
+  log(installer.tr("installer.banner.update"))
+  if result ~= nil and result.mirror ~= nil and result.base ~= nil then
+    log(installer.tr("installer.banner.source",
+      { name = tostring(result.mirror), base = tostring(result.base) }))
+  end
   log(installer.tr("installer.banner.footer"))
+end
+
+-- installer.mirror_names() -> comma-separated list of mirror names, for usage.
+function installer.mirror_names()
+  local names = {}
+  for index = 1, #installer.MIRRORS do
+    names[index] = installer.MIRRORS[index].name
+  end
+  return table.concat(names, ", ")
+end
+
+-- installer.print_mirrors(env): the ordered source list, for --list-mirrors.
+function installer.print_mirrors(env)
+  local log = (env and env.log) or function() end
+  log(installer.tr("installer.mirrors.title"))
+  for index = 1, #installer.MIRRORS do
+    local entry = installer.MIRRORS[index]
+    log(installer.tr("installer.mirrors.entry",
+      { index = index, name = entry.name, base = entry.base }))
+  end
 end
 
 -- installer.print_usage(env)
@@ -876,6 +1097,9 @@ function installer.print_usage(env)
   log(installer.tr("installer.usage.title", { version = installer.VERSION }))
   log(installer.tr("installer.usage.syntax"))
   log(installer.tr("installer.usage.base", { default = installer.DEFAULT_BASE_URL }))
+  log(installer.tr("installer.usage.mirror", { names = installer.mirror_names() }))
+  log(installer.tr("installer.usage.no_mirror"))
+  log(installer.tr("installer.usage.list_mirrors"))
   log(installer.tr("installer.usage.result"))
   log(installer.tr("installer.usage.location", { root = installer.INSTALL_ROOT }))
 end
@@ -921,6 +1145,15 @@ function installer.main(argv, ioenv)
     return { ok = true, code = "help", installed = 0, total = 0 }
   end
 
+  if parsed.list_mirrors then
+    pcall(installer.print_mirrors, env)
+    return { ok = true, code = "list-mirrors", installed = 0, total = 0 }
+  end
+
+  -- Which sources may be used, in what order.  install() honours ioenv.base as
+  -- the older single-base contract, so sources_for() is only consulted when no
+  -- explicit base was given.
+  env.sources = installer.sources_for(parsed)
   env.base = parsed.base
   local result = installer.install(env)
 

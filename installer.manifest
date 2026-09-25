@@ -14,6 +14,7 @@
 # Entry programs (must sit beside the modules under /lib so require resolves).
 ccnbs.lua
 ccnbsplayer.lua
+updater.lua
 
 # NBS decode/analyze modules.
 nbs/analyze.lua
@@ -27,7 +28,7 @@ nbs/notes.lua
 nbs/reader.lua
 nbs/speakers.lua
 
-# Player runtime / UI modules.
+# Player runtime modules.
 player/clock.lua
 player/dispatch.lua
 player/fanout.lua
@@ -36,7 +37,6 @@ player/plan.lua
 player/runtime.lua
 player/speaker.lua
 player/tempo.lua
-player/tui.lua
 player/warnings.lua
 
 # Net modules required by the runtime.
@@ -44,6 +44,12 @@ net/http.lua
 net/nbw.lua
 net/zip.lua
 
-# UI layer: the i18n tables and the pure presentation logic.
+# UI layer: the Basalt app entry point, the i18n tables and the presentation logic.
+ui/basalt_app.lua
+ui/cjk.lua
 ui/i18n.lua
 ui/presenter.lua
+
+# Vendored third-party bundles the runtime loads (see vendor/README.md).
+vendor/basalt.lua
+vendor/utf8display.lua
