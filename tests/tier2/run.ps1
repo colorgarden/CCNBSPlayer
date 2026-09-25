@@ -14,6 +14,15 @@
 #   powershell -File tests/tier2/run.ps1 -Assert -Fixture tests/fixtures/compat_demo_song.nbs
 #   powershell -File tests/tier2/run.ps1 -Assert -DeterminismRuns 3
 #   powershell -File tests/tier2/run.ps1 -Assert -ExpectedFile tests/tier2/expected/v4.txt
+#   powershell -File tests/tier2/run.ps1 -Fixture tests/tier2/fixtures/capacity_10.nbs -SpeakerSides "back,left" -Assert
+#   powershell -File tests/tier2/run.ps1 -Fixture <file> -CaptureResult <path>   # copy result.txt out for a spec
+#
+# -SpeakerSides <csv>: the emulated speaker sides record.lua attaches and routes
+#   through player.fanout.assign (default "back").  The SAME sides are handed to
+#   the projection assertion, so a multi-speaker fixture compares like-for-like.
+# -CaptureResult <path>: copy the recorded result.txt to <path> before the temp
+#   directory is deleted.  Used by tests/tier2/edge_cases.ps1 to assert on the
+#   raw file channel even when the run is EXPECTED to fail (malformed corpus).
 #
 # ASSERTION MODE (-Assert without -ExpectedFile):
 #   * tests/tier2/assert_order.lua projects the expected ordered call sequence
@@ -63,6 +72,14 @@ param(
     # the default 10 is practical; lower it only if that ever stops being true.
     [int]$DeterminismRuns = 10,
 
+    # Comma/space-separated speaker sides the emulated run attaches and routes
+    # through player.fanout.assign.  Default keeps the historical single speaker.
+    [string]$SpeakerSides = "back",
+
+    # Optional: copy the recorded result.txt to this path before the temp
+    # directory is removed (used by edge_cases.ps1 to assert on raw records).
+    [string]$CaptureResult = "",
+
     # Lua interpreter used for the host-side projection/comparison.
     [string]$LuaExe = "lua"
 )
@@ -73,6 +90,12 @@ $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 $ConsoleExe  = "D:\tools\CraftOS-PC\CraftOS-PC_console.exe"
 $ScriptFile  = Join-Path $ScriptDir "record.lua"
+
+# Normalise -SpeakerSides into a non-empty list of side names.
+$script:SpeakerSideList = @($SpeakerSides -split "[,\s]+" | Where-Object { $_ -ne "" })
+if ($script:SpeakerSideList.Count -eq 0) {
+    $script:SpeakerSideList = @("back")
+}
 
 $script:TempDir = $null
 
@@ -121,6 +144,12 @@ function Invoke-Tier2 {
         Copy-Item -LiteralPath (Join-Path $ProjectRoot "nbs")    -Destination (Join-Path $computerDir "nbs")    -Recurse -Force
         Copy-Item -LiteralPath (Join-Path $ProjectRoot "player") -Destination (Join-Path $computerDir "player") -Recurse -Force
         Copy-Item -LiteralPath $FixturePath                      -Destination (Join-Path $computerDir "fixture.nbs") -Force
+
+        # The speaker sides record.lua must attach and route through.  record.lua
+        # reads this file (falling back to "back" when absent), so the same Lua
+        # drives one or many emulated speakers without a second script.
+        Set-Content -LiteralPath (Join-Path $computerDir "speakers.txt") `
+            -Value ($script:SpeakerSideList -join ",") -Encoding ASCII -NoNewline
 
         # No audio device is needed by the emulated speaker.
         $env:SDL_AUDIODRIVER = "dummy"
@@ -180,7 +209,12 @@ function Invoke-Tier2 {
             return Show-Failure 4 "result.txt was not written at $resultPath"
         }
 
-        $resultText = Get-Content -LiteralPath $resultPath -Raw
+        # Read result.txt as UTF-8 EXPLICITLY.  PowerShell 5.1's Get-Content
+        # defaults to the ANSI code page, which mis-decodes the WARN[...] Chinese
+        # prose; worse, a GBK lead byte can consume the following 0x0A, merging
+        # the WARN line with STATUS and making the status check fail.  The
+        # emulator writes correct UTF-8; the host must decode it as such.
+        $resultText = [System.IO.File]::ReadAllText($resultPath, [System.Text.Encoding]::UTF8)
         if (-not $Quiet) {
             Write-Host "----- result.txt -----"
             Write-Host $resultText
@@ -289,8 +323,19 @@ function Invoke-SequenceAssertion {
 
         Write-Host ""
         Write-Host "--- projection assertion (child: $LuaExe assert_order.lua) ---"
-        & $LuaExe $assertOrderPath "--assert" $FixturePath $tmpResult "back" 2>&1 | ForEach-Object { Write-Host $_ }
-        $luaExit = $LASTEXITCODE
+        $luaArgs = @($assertOrderPath, "--assert", $FixturePath, $tmpResult) + $script:SpeakerSideList
+        # A native child that writes its assertion failure to stderr must NOT be
+        # treated as a terminating PowerShell error: only its EXIT CODE decides
+        # the result, so a genuine mismatch reaches exit 12 below.
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $LuaExe @luaArgs 2>&1 | ForEach-Object { Write-Host $_ }
+            $luaExit = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousEap
+        }
         if ($luaExit -ne 0) {
             return Show-Failure 12 "projected sequence does not match the recorded sequence (lua exit $luaExit)"
         }
@@ -364,11 +409,30 @@ else {
 }
 
 # ---------------------------------------------------------------------------
+# Optional result capture (before the temp directory is deleted).
+# ---------------------------------------------------------------------------
+if ($CaptureResult -ne "" -and $script:LastResultText -ne "") {
+    $capturePath = Resolve-ProjectPath $CaptureResult
+    $captureDir  = Split-Path -Parent $capturePath
+    if ($captureDir -ne "" -and -not (Test-Path -LiteralPath $captureDir)) {
+        New-Item -ItemType Directory -Path $captureDir -Force | Out-Null
+    }
+    [System.IO.File]::WriteAllText($capturePath, $script:LastResultText)
+    Write-Host "captured result.txt -> $capturePath"
+}
+
+# ---------------------------------------------------------------------------
 # Cleanup receipts and the zero-process assertion.
 # ---------------------------------------------------------------------------
 $temp = $script:TempDir
 $tempGone = -not (Test-Path -LiteralPath $temp)
+# Process teardown on Windows can lag a tick after WaitForExit; settle briefly
+# before declaring a survivor.  A REAL leak persists well past this window.
 $survivors = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "*CraftOS*" })
+for ($attempt = 0; $attempt -lt 5 -and $survivors.Count -ne 0; $attempt++) {
+    Start-Sleep -Milliseconds 200
+    $survivors = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "*CraftOS*" })
+}
 Write-Host "temp dir removed: $tempGone ($temp)"
 Write-Host "surviving CraftOS processes: $($survivors.Count)"
 

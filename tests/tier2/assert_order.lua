@@ -16,7 +16,11 @@
 --       assignment  the fanout.assign() result,
 --       analysis    the nbs.analyze() result,
 --       plan        the player.plan() event array,
+--       warnings    the REAL dispatcher's once-only bare warning codes,
 --   }
+--
+--   assert_order.project(events, analysis, speaker_sides) -> the same shape
+--   minus analysis/plan.
 --
 -- The projection runs the REAL production modules, in the REAL pipeline order:
 --
@@ -274,6 +278,11 @@ function assert_order.project(events, analysis, speaker_sides)
     calls = calls,
     assignment = assignment,
     records = records,
+    -- The REAL dispatcher's once-only warning ledger, in emission order.  It
+    -- carries the bare codes (e.g. "custom-instrument"); the WARN[...] renderer
+    -- is player/warnings.lua.  Exposed so the failure/edge specs can assert the
+    -- refusal warning without re-typing the routing.
+    warnings = dispatcher:warnings(),
   }
 end
 
@@ -301,6 +310,7 @@ function assert_order.expect(bytes, speaker_sides)
     assignment = projected.assignment,
     analysis = analysis,
     plan = events,
+    warnings = projected.warnings,
   }
 end
 

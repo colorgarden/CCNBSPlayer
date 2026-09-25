@@ -56,6 +56,25 @@
 -- os.shutdown.  This is a fixed teardown wait, NOT waiting for the song: the
 -- song itself is driven entirely by the virtual clock, synchronously.
 --
+-- ---------------------------------------------------------------------------
+-- MULTI-SPEAKER ROUTING AND NON-CALL RECORD LINES (task-30)
+-- ---------------------------------------------------------------------------
+-- The harness attaches one speaker per side listed in /speakers.txt (written by
+-- run.ps1 -SpeakerSides) and routes every planned event through the REAL
+-- player.fanout.assign allocator, dispatching each event to the side it owns.
+-- This is what makes an overflow fixture show a real DROP (a player decision)
+-- rather than an emulator budget refusal, and what makes a two-speaker run show
+-- a genuinely balanced split.
+--
+-- Besides the `CALL ...` lines, result.txt now carries these NON-CALL summary
+-- lines (ignored by the projection comparator and by the CALL-consuming host
+-- assertions, but asserted by tests/tier2/edge_cases.ps1):
+--     ASSIGN required=<n> found=<n> dropped=<n> warning=<code|->
+--     WARGS peak=<n> required=<n> found=<n> dropped=<n>     (only with a warning)
+--     SPLIT <side> <placed-events>
+--     DROPPED tick=<n> layer=<n> note=<n> kind=<kind>
+--     WARN[<code>] <Chinese explanation>
+--
 -- Compatibility: this runs under Cobalt (Lua 5.2), so it uses no `//`, no
 -- bitwise operators, no utf8.*, no goto, no os.exit.
 
@@ -78,7 +97,17 @@ do
 end
 
 local FIXTURE_PATH = "/fixture.nbs"
-local SPEAKER_SIDE = "back"
+-- ---------------------------------------------------------------------------
+-- THE SPEAKER SET (single vs multi)
+-- ---------------------------------------------------------------------------
+-- run.ps1 writes a comma-separated side list to /speakers.txt.  This harness
+-- attaches a speaker on each requested side and routes every event through the
+-- REAL player.fanout.assign allocator, so the recorded CALL lines carry the
+-- side the player chose -- not a fixed single side.  When /speakers.txt is
+-- absent (e.g. running this script by hand) the harness attaches one speaker on
+-- "back", which is exactly the historical behaviour.
+local SPEAKER_SIDES_PATH = "/speakers.txt"
+local DEFAULT_SPEAKER_SIDES = { "back" }
 local AUDIO_DRAIN_SECONDS = 1.5
 
 -- ---------------------------------------------------------------------------
@@ -115,6 +144,18 @@ local function format_arg(value)
     return "nil"
   end
   return tostring(value)
+end
+
+-- record_line(text): append one already-formatted line to the recording.  Used
+-- for the assignment summary and the WARN[...] lines; CALL lines still go
+-- through record_call.  Non-CALL lines are ignored by the projection comparator
+-- and by every CALL-consuming host assertion, so they never perturb playback
+-- comparisons.
+local function record_line(text)
+  if recording_suppressed then
+    return
+  end
+  recorded[#recorded + 1] = text
 end
 
 -- record_call(side, method, ...): append one `CALL <side> <method> <args...>`
@@ -259,14 +300,85 @@ local function read_fixture()
   return bytes
 end
 
+-- read_speaker_sides() -> array of side names.  Reads /speakers.txt (written by
+-- run.ps1); falls back to the single "back" speaker when the file is absent or
+-- unreadable, so a hand-run of this script keeps working.
+local function read_speaker_sides()
+  if type(fs) ~= "table" or type(fs.exists) ~= "function"
+    or type(fs.open) ~= "function" then
+    return DEFAULT_SPEAKER_SIDES
+  end
+  if not fs.exists(SPEAKER_SIDES_PATH) then
+    return DEFAULT_SPEAKER_SIDES
+  end
+  local handle = fs.open(SPEAKER_SIDES_PATH, "r")
+  if handle == nil then
+    return DEFAULT_SPEAKER_SIDES
+  end
+  local content = handle.readAll()
+  handle.close()
+
+  local sides = {}
+  for token in tostring(content):gmatch("[^,%s]+") do
+    sides[#sides + 1] = token
+  end
+  if #sides == 0 then
+    return DEFAULT_SPEAKER_SIDES
+  end
+  return sides
+end
+
+-- emit_assignment(assignment, records): write the fan-out decision to
+-- result.txt as greppable summary lines.  These are NOT CALL lines; the
+-- projection comparator ignores them, and they let the failure/edge specs assert
+-- the routing, the drop identities and the real warning args.
+local function emit_assignment(assignment, records)
+  local warning = "-"
+  if assignment.warning_code ~= nil then
+    warning = tostring(assignment.warning_code)
+  end
+  record_line(string.format("ASSIGN required=%s found=%s dropped=%s warning=%s",
+    tostring(assignment.required), tostring(assignment.found),
+    tostring(assignment.dropped), warning))
+
+  if assignment.warning_args ~= nil then
+    local args = assignment.warning_args
+    record_line(string.format(
+      "WARGS peak=%s required=%s found=%s dropped=%s",
+      tostring(args.peak), tostring(args.required),
+      tostring(args.found), tostring(args.dropped)))
+  end
+
+  for index = 1, #records do
+    local side = records[index].side
+    local bucket = assignment.by_speaker[side]
+    local count = 0
+    if bucket ~= nil then
+      count = #bucket
+    end
+    record_line(string.format("SPLIT %s %d", tostring(side), count))
+  end
+
+  for index = 1, #assignment.dropped_events do
+    local event = assignment.dropped_events[index]
+    record_line(string.format("DROPPED tick=%s layer=%s note=%s kind=%s",
+      tostring(event.tick_index), tostring(event.layer_index),
+      tostring(event.note_index), tostring(event.kind)))
+  end
+end
+
 -- main(): reproduce a whole playback on the real modules.
 local function main()
   install_peripheral_recorder()
 
-  -- Attach the emulated speaker.  Guarded so the script is harmless where
+  local sides = read_speaker_sides()
+
+  -- Attach the emulated speakers.  Guarded so the script is harmless where
   -- periphemu is absent.
   if type(periphemu) == "table" and type(periphemu.create) == "function" then
-    periphemu.create(SPEAKER_SIDE, "speaker")
+    for index = 1, #sides do
+      periphemu.create(sides[index], "speaker")
+    end
   end
 
   local bytes = read_fixture()
@@ -280,10 +392,12 @@ local function main()
   local decode = require("nbs.decode")
   local analyze = require("nbs.analyze")
   local plan = require("player.plan")
+  local fanout = require("player.fanout")
   local dispatch = require("player.dispatch")
   local speaker = require("player.speaker")
   local clock = require("player.clock")
   local tempo = require("player.tempo")
+  local warnings = require("player.warnings")
 
   local decoded = decode.decode(bytes)
   if not decoded.ok then
@@ -299,15 +413,53 @@ local function main()
 
   local records = speaker.discover()
   if #records == 0 then
-    error("no speaker peripheral discovered (expected one on side '"
-      .. SPEAKER_SIDE .. "')", 0)
+    error("no speaker peripheral discovered (requested sides: "
+      .. table.concat(sides, ",") .. ")", 0)
+  end
+
+  -- THE REAL ALLOCATOR decides which speaker owns each event and which events
+  -- are DROPPED.  The harness then walks the events in the same frozen
+  -- (tick, layer, note) order and dispatches each one to its owner -- so a drop
+  -- here is a real player decision, not an emulator per-tick budget refusal.
+  local assignment = fanout.assign(events, analysis, records)
+  emit_assignment(assignment, records)
+
+  local record_by_side = {}
+  for index = 1, #records do
+    record_by_side[records[index].side] = records[index]
+  end
+
+  -- Recover each event's owner by consuming the assignment's by_speaker buckets
+  -- with a per-side cursor and matching the event BY IDENTITY -- exactly the
+  -- rule tests/tier2/assert_order.lua projects with, so recording and projection
+  -- cannot drift.
+  local cursors = {}
+  local function owner_side(event)
+    for index = 1, #records do
+      local side = records[index].side
+      local bucket = assignment.by_speaker[side]
+      if bucket ~= nil then
+        local next_index = (cursors[side] or 0) + 1
+        local candidate = bucket[next_index]
+        if candidate ~= nil and rawequal(candidate, event) then
+          cursors[side] = next_index
+          return side
+        end
+      end
+    end
+    return nil
   end
 
   local dispatcher = dispatch.new()
   local vclock = clock.new_virtual(0)
 
   local function on_event(event)
-    local result = dispatcher:event(event, records[1])
+    local side = owner_side(event)
+    if side == nil then
+      -- Dropped by the allocator: it must make NO speaker call at all.
+      return
+    end
+    local result = dispatcher:event(event, record_by_side[side])
     if result.error_message ~= nil then
       error(result.error_message, 0)
     end
@@ -335,6 +487,32 @@ local function main()
   if stats.ticks_scheduled ~= #events then
     error(string.format("scheduled %d of %d planned events",
       stats.ticks_scheduled, #events), 0)
+  end
+
+  -- Render the warnings the REAL dispatcher emitted (bare codes) through the
+  -- REAL renderer, and add the load-time extended-range warning the analysis
+  -- carries.  Each code is rendered at most once.
+  local warn_lines = {}
+  local renderer = warnings.new({
+    emit = function(line)
+      warn_lines[#warn_lines + 1] = line
+    end,
+  })
+  local codes = dispatcher:warnings()
+  for index = 1, #codes do
+    renderer:report(codes[index])
+  end
+  if analysis.has_extended_range then
+    renderer:report(warnings.CODES.EXTENDED_RANGE,
+      { min_key = analysis.min_key, max_key = analysis.max_key })
+  end
+  -- The fan-out allocator's own warning (a bare "speakers" code with the real
+  -- {peak, required, found, dropped}) rendered through the same once-only seam.
+  if assignment.warning_code ~= nil then
+    renderer:report(assignment.warning_code, assignment.warning_args)
+  end
+  for index = 1, #warn_lines do
+    record_line(warn_lines[index])
   end
 end
 
