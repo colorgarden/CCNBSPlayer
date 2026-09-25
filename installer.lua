@@ -181,6 +181,9 @@ end
 --   "dir"  -> refuse (never clobber a directory)
 --   "file" -> write (idempotent re-run; truncate + replace)
 --   "none" -> write (fresh install)
+--
+-- install() calls this for EVERY target, so this is the SINGLE owner of the
+-- overwrite decision; `kind` classifies whatever already sits at the target.
 function installer.should_overwrite(kind)
   if kind == "dir" then
     return "refuse"
@@ -323,8 +326,20 @@ function installer.install(ioenv)
   for index = 1, #plan do
     local entry = plan[index]
 
-    -- Refuse to replace a directory with a file.
-    if fs.exists(entry.target) and fs.is_dir(entry.target) then
+    -- The overwrite POLICY lives in ONE place -- installer.should_overwrite.
+    -- Classify whatever already occupies the target ("none" / "file" / "dir")
+    -- and let the policy decide.  A "refuse" (a directory sitting where a file
+    -- must go) stops the install rather than destroying unrelated data; a
+    -- "write" is the idempotent re-run / fresh install.
+    local existing_kind = "none"
+    if fs.exists(entry.target) then
+      if fs.is_dir(entry.target) then
+        existing_kind = "dir"
+      else
+        existing_kind = "file"
+      end
+    end
+    if installer.should_overwrite(existing_kind) == "refuse" then
       return {
         ok = false,
         code = "dir-refused",

@@ -410,6 +410,42 @@ describe("installer install(ioenv)", function()
     expect.contains(result.message, "/lib/ccnbs.lua")
   end)
 
+  it("consults should_overwrite as the SINGLE source of the overwrite policy", function()
+    -- A file already sits at the first target, so install() must ask the policy
+    -- what to do rather than re-implementing the decision inline.  Forcing the
+    -- policy to refuse an existing FILE (not just a directory) must make
+    -- install() refuse it too.
+    local fs = make_fake_fs()
+    fs.files["/lib/ccnbs.lua"] = "stale"
+
+    local saved = installer.should_overwrite
+    local kinds = {}
+    installer.should_overwrite = function(kind)
+      kinds[#kinds + 1] = kind
+      if kind == "file" then
+        return "refuse"
+      end
+      return saved(kind)
+    end
+
+    local result
+    local ok = pcall(function()
+      result = installer.install({
+        base = BASE,
+        http = make_fake_http(BASE),
+        fs = fs,
+        log = function() end,
+      })
+    end)
+
+    installer.should_overwrite = saved
+
+    expect.equal(ok, true)
+    expect.equal(kinds[1], "file")
+    expect.falsy(result.ok)
+    expect.equal(result.code, "dir-refused")
+  end)
+
   it("reports write-failed when the filesystem refuses the write", function()
     local fs = make_fake_fs()
     fs.write = function(path)
