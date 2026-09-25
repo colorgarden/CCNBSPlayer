@@ -209,7 +209,9 @@ end
 -- speaker.discover(): enumerate attached peripherals, keep only speakers, and
 -- return their records sorted by side name ASCENDING (stable, reproducible fan
 -- out and Tier-2 recordings).  With no `peripheral` global at all -- plain Lua
--- unit tests -- it returns an EMPTY ARRAY instead of raising.
+-- unit tests -- it returns an EMPTY ARRAY instead of raising.  Each getType
+-- call is pcall-guarded: a peripheral whose type lookup RAISES is skipped
+-- rather than allowed to abort discovery of the healthy speakers.
 function speaker.discover()
   local peripheral = live_peripheral()
   if peripheral == nil then
@@ -230,7 +232,12 @@ function speaker.discover()
   local records = {}
   if type(names) == "table" then
     for _, side in ipairs(names) do
-      if get_type(side) == "speaker" then
+      -- One uncooperative peripheral must not abort discovery of the others:
+      -- a getType that raises (absent/erroring peripheral) is treated as "not a
+      -- speaker" and the scan continues.  The final ascending-side sort keeps
+      -- discovery deterministic either way.
+      local ok, kind = pcall(get_type, side)
+      if ok and kind == "speaker" then
         records[#records + 1] = discovered_record(side)
       end
     end

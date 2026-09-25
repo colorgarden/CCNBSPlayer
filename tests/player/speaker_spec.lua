@@ -330,6 +330,49 @@ describe("speaker.discover", function()
 end)
 
 -- ---------------------------------------------------------------------------
+-- 13. A single uncooperative peripheral must not abort discovery of the rest
+-- ---------------------------------------------------------------------------
+
+describe("speaker.discover tolerates a failing getType", function()
+  it("13. a raising side does not abort discovery of the healthy speakers", function()
+    local fake_peripherals = {
+      back = fake_peripheral(true),
+      left = fake_peripheral(true),
+      front = fake_peripheral(true),
+    }
+    local declared = { "back", "left", "front" }
+    local fake_global = {
+      getNames = function()
+        return declared
+      end,
+      getType = function(side)
+        if side == "left" then
+          -- One peripheral that errors when asked its type.
+          error("peripheral on left is not responding")
+        end
+        if side == "front" or side == "back" then
+          return "speaker"
+        end
+        return "monitor"
+      end,
+      wrap = function(side)
+        return fake_peripherals[side]
+      end,
+    }
+    rawset(_G, "peripheral", fake_global)
+
+    local called, records = pcall(speaker.discover)
+    expect.equal(called, true)
+    expect.equal(#records, 2)
+    expect.sequence_equal(
+      { records[1].side, records[2].side }, { "back", "front" })
+
+    io.write("    CASE13 raising getType: ok=" .. tostring(called)
+      .. " sides=" .. records[1].side .. "," .. records[2].side .. "\n")
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
 -- 11-12. Module isolation guards
 -- ---------------------------------------------------------------------------
 
