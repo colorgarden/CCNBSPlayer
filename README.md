@@ -182,7 +182,7 @@ ccnbs.decode(bytes)                 -- 解码，返回「包装表」（见下�
 ccnbs.analyze(song)                 -- 分析
 ccnbs.plan(song, analysis)          -- 编排为有序事件
 ccnbs.discover_speakers()           -- 已挂载的扬声器
-ccnbs.play(song, opts) -> session   -- 播放（立即返回，不阻塞）
+ccnbs.play(song|plan, opts) -> session   -- 播放（立即返回，不阻塞；可传歌曲表或已编排的事件数组）
 ```
 
 **`decode` 返回的是一个「包装表」，不是歌曲本身**——请先判断 `.ok`，再取 `.song`：
@@ -202,6 +202,10 @@ local analysis = ccnbs.analyze(song)
 local events = ccnbs.plan(song, analysis)
 ccnbs.play(song, {})                  -- 只传歌曲表 song
 ```
+
+> `play` 也可直接接收 `ccnbs.plan` 返回的**事件数组**；此时必须再传 `opts.analysis`
+> （即 `ccnbs.analyze(song)`），否则会抛出类型化错误 `E_PLAN_REQUIRES_ANALYSIS`。
+> 详见 [`docs/API.md`](docs/API.md)。
 
 `decode` **从不抛错**（`nbs.decode.decode` 的冻结契约），错误一律以
 `{ok = false, error = {code = ...}}` 返回；`analyze` / `plan` / `play` 接纳的都是**歌曲表**

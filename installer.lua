@@ -109,12 +109,19 @@ installer.DEFAULT_BASE_URL =
 -- All user-facing failure text.  Chinese, actionable, and each carries a
 -- stable ASCII token so downstream tooling can match it.
 installer.MESSAGES = {
+  -- The HTTP-disabled advice must name the knobs that ACTUALLY work.  Command-
+  -- line `-o` / `--option` is IGNORED by the tested CraftOS-PC 2.8.3 build
+  -- (measured: the value stays at its default), so it must NOT be offered as
+  -- advice -- the only thing that takes effect is editing the config file and
+  -- RESTARTING the host.
   HTTP_DISABLED =
-    "安装失败：本机未启用 HTTP，安装器无法下载项目文件。\n"
-    .. "请先在服务器端启用 HTTP（(http-disabled)）：\n"
-    .. "  * Minecraft 服务器：编辑 computercraft-server.toml，把 http.enable = true（或在新版里设置 http_enable）；\n"
-    .. "  * CraftOS-PC 模拟器：启动参数加 -o http_enable=true。\n"
-    .. "启用 HTTP 后，重新运行安装命令即可。",
+    "安装失败：本机未启用 HTTP，安装器无法下载项目文件 (http-disabled)。\n"
+    .. "好消息：两个平台的 HTTP 默认都是开启的，绝大多数用户无需改动。\n"
+    .. "若 HTTP 被人为关闭，请启用后重启再重试：\n"
+    .. "  * CraftOS-PC 模拟器：编辑 <用户数据目录>/config/global.json，把 http_enable 设为 true；\n"
+    .. "  * 真实 CC:Tweaked 服务器：编辑 computercraft-server.toml，把 http.enabled 设为 true；\n"
+    .. "  * 注意：本模拟器构建会忽略 -o / --option 启动参数，改完配置文件后必须重启才生效。\n"
+    .. "重启 HTTP 后，重新运行安装命令即可。",
   MKDIR_FAILED_PREFIX = "安装失败：无法创建安装目录 (mkdir-failed)：",
   DOWNLOAD_FAILED_PREFIX = "安装失败：下载文件失败 (download-failed)：",
   WRITE_FAILED_PREFIX = "安装失败：写入文件失败 (write-failed)：",

@@ -505,3 +505,233 @@ describe("docs/API.md", function()
     end
   end)
 end)
+
+-- ---------------------------------------------------------------------------
+-- 14-18. play() accepts EITHER a song OR an already-computed plan (defect A).
+-- The plan is the shape ccnbs.plan returns: an array of event tables each
+-- carrying t_ms + kind; a song is a table whose header.version is numeric.
+-- ---------------------------------------------------------------------------
+
+describe("play accepts a song or a plan", function()
+  it("14. the exact reproduction succeeds and matches play(song) speaker calls", function()
+    local song = load_fixture("simple.nbs")
+    local an = ccnbs.analyze(song)
+    local events = ccnbs.plan(song, an)
+
+    -- Baseline: play the SONG.
+    local vc_song = clock.new_virtual(0)
+    local left_song = speaker.mock("left")
+    local right_song = speaker.mock("right")
+    ccnbs.play(song, { speakers = { left_song, right_song }, clock = vc_song })
+    clock.advance_to(vc_song, 1000000)
+
+    -- The reported reproduction: play the PLAN, with the analysis supplied.
+    local vc_plan = clock.new_virtual(0)
+    local left_plan = speaker.mock("left")
+    local right_plan = speaker.mock("right")
+    local session_plan
+    local ok, err = pcall(function()
+      session_plan = ccnbs.play(events, {
+        analysis = an,
+        speakers = { left_plan, right_plan },
+        clock = vc_plan,
+      })
+    end)
+    if not ok then
+      error("play(plan) raised: " .. tostring(err), 0)
+    end
+    clock.advance_to(vc_plan, 1000000)
+
+    expect.equal(#left_plan.calls + #right_plan.calls,
+      #left_song.calls + #right_song.calls)
+    expect.deep_equal(left_plan.calls, left_song.calls)
+    expect.deep_equal(right_plan.calls, right_song.calls)
+    -- The supplied plan is used VERBATIM: no re-analysis, no re-planning.
+    expect.equal(#session_plan.plan, #events)
+    expect.equal(session_plan.plan, events)
+  end)
+
+  it("15. play(plan) with NO analysis raises a CLEAR typed error naming opts.analysis", function()
+    local song = load_fixture("simple.nbs")
+    local an = ccnbs.analyze(song)
+    local events = ccnbs.plan(song, an)
+
+    local ok, err = pcall(function()
+      ccnbs.play(events)
+    end)
+
+    expect.equal(ok, false)
+    expect.equal(type(err), "table")
+    expect.equal(err.code, "E_PLAN_REQUIRES_ANALYSIS")
+    expect.contains(err.msg, "opts.analysis")
+    -- Crucially NOT the nil-arithmetic crash the defect reported.
+    expect.equal(err.msg:find("arithmetic", 1, true), nil)
+  end)
+
+  it("16. playing a song and its plan share the SAME ordered calls and warning-code set", function()
+    local song = make_song({
+      note(1, 0, 0, 20),  -- key 20: below the native range -> extended-range
+      note(1, 0, 20, 45), -- instrument id 20 (== vanilla) -> custom-instrument
+      note(2, 0, 0, 46),
+    }, { tps = 10, vanilla = 20 })
+    local an = ccnbs.analyze(song)
+    local events = ccnbs.plan(song, an)
+
+    local function run(target, options)
+      local vc = clock.new_virtual(0)
+      local left = speaker.mock("left")
+      local right = speaker.mock("right")
+      local codes = {}
+      local sequence = {}
+      local opts = {
+        speakers = { left, right },
+        clock = vc,
+        on_warning = function(code)
+          codes[#codes + 1] = code
+        end,
+        on_event = function(event)
+          sequence[#sequence + 1] = event.tick_index .. "/" .. event.layer_index
+            .. "/" .. event.note_index .. "/" .. event.kind
+        end,
+      }
+      for key, value in pairs(options or {}) do
+        opts[key] = value
+      end
+      ccnbs.play(target, opts)
+      clock.advance_to(vc, 1000000)
+      return left.calls, right.calls, codes, sequence
+    end
+
+    local left_song, right_song, song_codes, song_sequence = run(song, nil)
+    local left_plan, right_plan, plan_codes, plan_sequence =
+      run(events, { analysis = an })
+
+    expect.sequence_equal(plan_sequence, song_sequence)
+    expect.deep_equal(left_plan, left_song)
+    expect.deep_equal(right_plan, right_song)
+
+    local function code_set(codes)
+      local set = {}
+      for index = 1, #codes do
+        set[codes[index]] = true
+      end
+      return set
+    end
+    expect.deep_equal(code_set(plan_codes), code_set(song_codes))
+    -- Sanity: the fixture genuinely exercises two warning classes.
+    expect.truthy(code_set(song_codes)["extended-range"] == true)
+    expect.truthy(code_set(song_codes)["custom-instrument"] == true)
+  end)
+
+  it("17. a plan for an empty song (zero events) plays and finishes without raising", function()
+    local song = make_song({}, { tps = 10 })
+    local an = ccnbs.analyze(song)
+    local events = ccnbs.plan(song, an)
+    expect.equal(#events, 0)
+
+    local vc = clock.new_virtual(0)
+    local session
+    local ok, err = pcall(function()
+      session = ccnbs.play(events, {
+        analysis = an,
+        speakers = { speaker.mock("left") },
+        clock = vc,
+      })
+      clock.advance_to(vc, 1000)
+    end)
+    if not ok then
+      error("empty plan raised: " .. tostring(err), 0)
+    end
+    expect.equal(session.is_playing(), false)
+    expect.equal(session.stats().ticks_scheduled, 0)
+  end)
+
+  it("18. hostile inputs raise clear typed errors, never a nil-arithmetic crash", function()
+    local function expect_typed_refusal(value)
+      local ok, err = pcall(function()
+        ccnbs.play(value)
+      end)
+      expect.equal(ok, false)
+      expect.equal(type(err), "table")
+      expect.equal(err.code, "E_BAD_PLAY_INPUT")
+      expect.truthy(type(err.msg) == "string" and #err.msg > 0)
+      expect.equal(err.msg:find("arithmetic", 1, true), nil)
+    end
+
+    expect_typed_refusal(nil)
+    expect_typed_refusal("x")
+    expect_typed_refusal(42)
+    expect_typed_refusal(true)
+
+    -- An empty table is the plan of an empty song: legitimate, but a plan still
+    -- requires the caller's analysis - and says so clearly.
+    local ok, err = pcall(function()
+      ccnbs.play({})
+    end)
+    expect.equal(ok, false)
+    expect.equal(type(err), "table")
+    expect.equal(err.code, "E_PLAN_REQUIRES_ANALYSIS")
+    expect.contains(err.msg, "opts.analysis")
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 19-21. tempo-clamp on the PRODUCTION path (defect C).  ccnbs.play must pass
+-- the authoritative analysis.tick_ms into tempo.new; otherwise the scheduler
+-- infers the interval from the smallest event gap and under-reports a sparse
+-- sub-granularity song.
+-- ---------------------------------------------------------------------------
+
+describe("production-path tempo clamp", function()
+  local function play_and_collect(song)
+    local vc = clock.new_virtual(0)
+    local codes = {}
+    ccnbs.play(song, {
+      speakers = { speaker.mock("left") },
+      clock = vc,
+      on_warning = function(code)
+        codes[#codes + 1] = code
+      end,
+    })
+    clock.advance_to(vc, 1000000)
+    return codes
+  end
+
+  it("19. a sub-50ms nominal tempo (20 ms) warns exactly once through play", function()
+    -- Nominal tick_ms = 1000 / 50 = 20 ms, BELOW the 50 ms granularity.  The
+    -- events are sparse (ticks 0/10/20 -> 0/200/400 ms), so inferring from the
+    -- smallest gap saw 200 ms and the old production path never warned.
+    local song = make_song({
+      note(0, 0, 0, 45),
+      note(10, 0, 0, 46),
+      note(20, 0, 0, 47),
+    }, { tps = 50 })
+
+    local codes = play_and_collect(song)
+    expect.equal(code_count(codes, "tempo-clamp"), 1)
+  end)
+
+  it("20. an ordinary 100 ms song produces NO tempo-clamp through play", function()
+    local song = make_song({
+      note(1, 0, 0, 45),
+      note(2, 0, 0, 46),
+      note(3, 0, 0, 47),
+    }, { tps = 10 })
+
+    local codes = play_and_collect(song)
+    expect.equal(code_count(codes, "tempo-clamp"), 0)
+  end)
+
+  it("21. a sparse song with a legitimate slow tempo gets no spurious clamp", function()
+    -- REGRESSION: 5 tps -> 200 ms nominal, sparse events.  Passing a real and
+    -- legitimately slow tick_ms must not manufacture a clamp warning.
+    local song = make_song({
+      note(0, 0, 0, 45),
+      note(10, 0, 0, 46),
+      note(20, 0, 0, 47),
+    }, { tps = 5 })
+
+    local codes = play_and_collect(song)
+    expect.equal(code_count(codes, "tempo-clamp"), 0)
+  end)
+end)

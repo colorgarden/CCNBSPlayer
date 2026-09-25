@@ -19,9 +19,29 @@
 --   ccnbs.plan(song, analysis) -> player.plan.plan(song, analysis)
 --   ccnbs.discover_speakers()  -> player.speaker.discover()
 --   ccnbs.version              -> "1.0.0"
---   ccnbs.play(song, opts)     -> session
+--   ccnbs.play(song|plan, opts) -> session
+--
+-- `play` accepts EITHER a decoded song OR an already-computed plan.  The
+-- discriminator is the SHAPE, not a coincidental field:
+--   * a SONG is a table carrying a `header` table (a decoded song's header has
+--     a numeric `version`; analysis needs its `tempo_ticks_per_second`); play
+--     analyzes and plans it exactly as before;
+--   * a PLAN is the array ccnbs.plan returns: every element is an event table
+--     carrying a numeric `t_ms` and a string `kind` (a genuinely empty table is
+--     the plan of a song with no notes).  A plan is used VERBATIM -- it is
+--     never re-analyzed (an event array has no song header to analyze) and
+--     never re-planned.
+--   * anything else raises E_BAD_PLAY_INPUT.
+--
+-- A plan carries no song header, so it cannot size the speakers or the tick
+-- interval by itself: pass the matching `opts.analysis` (the ccnbs.analyze(song)
+-- you planned with).  Omitting it raises the typed error
+-- E_PLAN_REQUIRES_ANALYSIS, naming opts.analysis -- never a nil-arithmetic
+-- crash.  Playing a song and playing its plan therefore produce IDENTICAL
+-- behaviour (same warnings, same allocation, same call sequence).
 --
 -- `opts` (all optional; the seams are injectable):
+--   opts.analysis    the analysis matching a PLAN (ignored when a song is given)
 --   opts.speakers    array of speaker records; default player.speaker.discover()
 --   opts.clock       a clock; default player.clock.new_os()
 --   opts.on_warning  function(code, args), once per DISTINCT bare code
@@ -92,15 +112,98 @@ function ccnbs.discover_speakers()
   return speaker_module.discover()
 end
 
--- ccnbs.play(song, opts) -> session
---
--- Composes the whole player behind one call and returns immediately.  See the
--- module header for the opts and warning contract.
-function ccnbs.play(song, opts)
-  opts = opts or {}
+-- is_song(value): the RELIABLE song discriminator -- NOT a guess from a field a
+-- plan could coincidentally share.  A song is a table carrying a `header` table;
+-- a decoded song always has a numeric `header.version`, and analysis further
+-- needs the header's numeric `tempo_ticks_per_second`.  A MINIMAL synthetic song
+-- may omit `version` but must still carry the tempo -- accepting either keeps
+-- hand-built test songs working without ever mistaking a plan for a song (a plan
+-- array has NO `header` key at all).
+local function is_song(value)
+  if type(value) ~= "table" then
+    return false
+  end
+  local header = value.header
+  if type(header) ~= "table" then
+    return false
+  end
+  return type(header.version) == "number"
+    or type(header.tempo_ticks_per_second) == "number"
+end
 
-  local analysis = analyze_module.analyze(song)
-  local events = plan_module.plan(song, analysis)
+-- is_plan(value): the RELIABLE plan discriminator.  A plan is an ARRAY of event
+-- tables, each carrying a numeric `t_ms` and a string `kind` (player.plan's
+-- frozen event shape).  A genuinely EMPTY table is the plan of a song with no
+-- notes; a table with ONLY non-array keys is not a plan -- it is rejected as
+-- nonsense instead of being silently treated as an empty song.
+local function is_plan(value)
+  if type(value) ~= "table" then
+    return false
+  end
+  local count = #value
+  if count == 0 then
+    return next(value) == nil
+  end
+  for index = 1, count do
+    local event = value[index]
+    if type(event) ~= "table" then
+      return false
+    end
+    if type(event.t_ms) ~= "number" then
+      return false
+    end
+    if type(event.kind) ~= "string" then
+      return false
+    end
+  end
+  return true
+end
+
+-- ccnbs.play(song|plan, opts) -> session
+--
+-- Composes the whole player behind one call and returns immediately.  The first
+-- argument may be a decoded SONG or an already-computed PLAN; see the module
+-- header for the discriminator rule, opts.analysis and the warning contract.
+function ccnbs.play(song_or_plan, opts)
+  if opts == nil then
+    opts = {}
+  end
+  if type(opts) ~= "table" then
+    error({
+      code = "E_BAD_PLAY_OPTS",
+      msg = "ccnbs.play: opts must be a table or nil; got " .. type(opts),
+    }, 2)
+  end
+
+  -- Resolve (events, analysis).  A song is analyzed and planned here; a plan is
+  -- taken VERBATIM (never re-analyzed -- it is an event array -- and never
+  -- re-planned) and needs the caller's matching analysis.
+  local events
+  local analysis
+  if is_song(song_or_plan) then
+    analysis = analyze_module.analyze(song_or_plan)
+    events = plan_module.plan(song_or_plan, analysis)
+  elseif is_plan(song_or_plan) then
+    events = song_or_plan
+    analysis = opts.analysis
+    if type(analysis) ~= "table" then
+      error({
+        code = "E_PLAN_REQUIRES_ANALYSIS",
+        msg = "ccnbs.play: a plan is an array of events and carries no song "
+          .. "header, so it cannot size the speakers or the tick interval by "
+          .. "itself; pass opts.analysis = ccnbs.analyze(song), or call "
+          .. "ccnbs.play(song, opts) with the song instead.",
+      }, 2)
+    end
+  else
+    error({
+      code = "E_BAD_PLAY_INPUT",
+      msg = "ccnbs.play: expected a song (a table carrying a header table) or a "
+        .. "plan (an array of events each carrying t_ms and kind); "
+        .. "got " .. type(song_or_plan),
+    }, 2)
+  end
+
   local total = #events
 
   local speakers = opts.speakers
@@ -179,6 +282,11 @@ function ccnbs.play(song, opts)
 
   local tempo_session = tempo_module.new({
     clock = clock_obj,
+    -- The AUTHORITATIVE nominal tick interval (defect C).  Without it the
+    -- scheduler infers the interval from the smallest gap between event times,
+    -- which OVER-estimates a sparse song's interval and SKIPS the genuine
+    -- sub-granularity clamp warning.
+    tick_ms = analysis.tick_ms,
     -- tempo's warn callback hands back a BARE code with no args.
     warn = function(code)
       emit(code, {})

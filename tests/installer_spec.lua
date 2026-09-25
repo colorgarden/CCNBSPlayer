@@ -365,17 +365,33 @@ describe("installer install(ioenv)", function()
     expect.equal(fs.files["/lib/ccnbs.lua"], read_repo_file("ccnbs.lua"))
   end)
 
-  it("reports http-disabled when no http seam is supplied", function()
+  it("reports http-disabled with WORKING config-file advice, not the dead -o flag", function()
     local fs = make_fake_fs()
     local result = installer.install({ base = BASE, fs = fs, log = function() end })
 
     expect.falsy(result.ok)
     expect.equal(result.code, "http-disabled")
     expect.equal(result.installed, 0)
+    expect.equal(#fs.writes, 0)
+
+    -- Coarse sanity kept from the original assertion.
     expect.contains(result.message, "HTTP")
     expect.contains(result.message, "http_enable")
     expect.contains(result.message, "启用 HTTP")
-    expect.equal(#fs.writes, 0)
+
+    -- POSITIVE guidance that actually works.  Narrowing the assertion to the
+    -- real mechanism (plus restart) is what makes it FAIL on the old wording,
+    -- where the only "advice" was the flag the emulator ignores.
+    expect.contains(result.message, "config/global.json")
+    expect.contains(result.message, "computercraft-server.toml")
+    expect.contains(result.message, "http.enabled")
+    expect.contains(result.message, "重启")
+
+    -- The ineffective flag advice must be GONE.  Assert the imperative and the
+    -- literal command, not a bare key name (a bare `http_enable` substring
+    -- passes for BOTH the wrong and the right advice).
+    expect.equal(result.message:find("启动参数加", 1, true), nil)
+    expect.equal(result.message:find("-o http_enable=true", 1, true), nil)
   end)
 
   it("reports http-failed when a fetch returns nil", function()

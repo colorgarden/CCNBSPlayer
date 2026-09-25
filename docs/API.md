@@ -22,7 +22,7 @@ local ccnbs = require("ccnbs")
 | `ccnbs.decode(bytes)` | 与 `nbs.decode.decode` 完全相同的结构：成功 `{ok=true, song=...}`，失败 `{ok=false, error={code=...}}` |
 | `ccnbs.analyze(song)` | 与 `nbs.analyze.analyze` 完全相同的结构 |
 | `ccnbs.plan(song, analysis)` | 事件数组（冻结全序 `(tick_index, layer_index, note_index)`） |
-| `ccnbs.play(song, opts)` | 一个**会话** `session`，立即返回、不阻塞 |
+| `ccnbs.play(song\|plan, opts)` | 一个**会话** `session`，立即返回、不阻塞（第一个参数可以是歌曲表，也可以是已编排好的事件数组） |
 | `ccnbs.discover_speakers()` | 已挂载扬声器记录数组（side 升序），调用 `player.speaker.discover` |
 | `ccnbs.version` | 版本字符串，例如 `"1.0.0"` |
 
@@ -44,6 +44,35 @@ local ccnbs = require("ccnbs")
 `play` 只在注入的时钟上排期后立即返回。测试用虚拟时钟通过
 `clock.advance_to(vc, target_ms)` 推进；生产用 os 时钟与真实定时器。
 `play` 自身不忙等、不睡眠，节奏由 `player.tempo` 负责。
+
+## `play` 的第一个参数：歌曲或计划
+
+`play` 接受**两种**形状，靠**形状**可靠区分（不靠某个可能碰巧存在的字段）：
+
+- **歌曲**：带 `header` 表的表。`ccnbs.decode` 产出的歌曲其 `header.version`
+  是数字，分析还需要 `header.tempo_ticks_per_second`。给出歌曲时，`play` 照旧先
+  `analyze` 再 `plan`，行为与从前完全一致。
+- **计划**：`ccnbs.plan` 返回的**事件数组**——每个元素都带数字 `t_ms` 与字符串
+  `kind`。给出计划时，`play` **原样使用**它，既不重新分析（事件数组没有歌曲头可
+  分析），也不重新编排。空表被视为「零事件歌曲的计划」。
+- 其它任何值（`nil`、字符串、数字……）都会抛出类型化错误 `E_BAD_PLAY_INPUT`。
+
+计划本身**不含歌曲头**，无法自行推算扬声器需求与节拍间隔，因此必须把与之匹配的
+分析经 `opts.analysis` 传入：
+
+| 选项 | 何时需要 | 说明 |
+| --- | --- | --- |
+| `opts.analysis` | 仅当第一个参数是**计划**时 | 与计划匹配的分析结果（即 `ccnbs.analyze(song)`）；参数是歌曲时忽略 |
+
+```text
+local analysis = ccnbs.analyze(song)
+local events = ccnbs.plan(song, analysis)
+ccnbs.play(events, { analysis = analysis })   -- 播放已编排好的计划
+```
+
+省略 `opts.analysis` 时会抛出类型化错误 `E_PLAN_REQUIRES_ANALYSIS`（错误信息点名
+`opts.analysis`），而**不是**一个 nil 算术崩溃。播放歌曲与播放其计划的行为
+**完全一致**：相同的警告、相同的分配、相同的调用序列。
 
 ## 会话对象 `session`
 
@@ -125,6 +154,44 @@ assert(session.is_playing() == false)
 for code, count in pairs(warning_counts) do
   assert(count == 1, "each warning code fires at most once: " .. code)
 end
+```
+
+### 等价示例：播放已编排好的计划
+
+`ccnbs.plan` 与 `ccnbs.play` 分离的意义，是让调用方**编排一次、播放一个计划**。
+播放计划时把与之匹配的分析经 `opts.analysis` 传入即可；行为与播放歌曲完全一致。
+下面的示例同样被测试套件**实际执行**：
+
+```lua
+local ccnbs = require("ccnbs")
+local clock = require("player.clock")
+local speaker = require("player.speaker")
+
+local file = assert(io.open("tests/fixtures/simple.nbs", "rb"))
+local bytes = file:read("*a")
+file:close()
+
+local decoded = ccnbs.decode(bytes)
+assert(decoded.ok, "decode failed")
+
+local analysis = ccnbs.analyze(decoded.song)
+local events = ccnbs.plan(decoded.song, analysis)
+
+local left = speaker.mock("left")
+local right = speaker.mock("right")
+local vclock = clock.new_virtual(0)
+
+-- 播放 PLAN（不是歌曲）：必须传 opts.analysis。
+local session = ccnbs.play(events, {
+  analysis = analysis,
+  speakers = { left, right },
+  clock = vclock,
+})
+clock.advance_to(vclock, 60000)
+
+assert(session.is_playing() == false)
+assert(#session.plan == #events)                 -- 计划被原样使用，未重新编排
+assert(#left.calls + #right.calls > 0)
 ```
 
 ## 注意事项
