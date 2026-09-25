@@ -32,6 +32,8 @@
 
 local analyze = require("nbs.analyze")
 local decode = require("nbs.decode")
+local instrument_table = require("nbs.instrument_table")
+local speakers = require("nbs.speakers")
 
 -- ---------------------------------------------------------------------------
 -- Project root + fixture helpers (same convention as decode_spec.lua)
@@ -425,6 +427,111 @@ describe("nbs.analyze tied maximum", function()
     expect.equal(result.peak_concurrent, 2)
     expect.equal(result.vanilla_notes_at_peak, 2)
     expect.equal(result.play_sound_notes_at_peak, 0)
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 17-19. classification agrees with nbs.instrument_table (B3)
+--
+-- The classifier must have ONE owner.  analyze.lua used to re-implement the
+-- rule with hardcoded constants while instrument_table.resolve() used the
+-- file's own vanilla_instrument_count -- and the two disagreed for counts 10
+-- and 17..19.  A single-note song makes analyze's bucket observable: the note
+-- lands in vanilla_notes_at_peak, play_sound_notes_at_peak, or neither (custom).
+-- ---------------------------------------------------------------------------
+
+describe("nbs.analyze instrument buckets agree with nbs.instrument_table", function()
+  -- Which bucket analyze's result implies for a ONE-note song.
+  local function observed_bucket(instrument, count)
+    local result = analyze.analyze(song({
+      vic = count,
+      notes = { n(0, instrument, 45) },
+    }))
+    if result.vanilla_notes_at_peak == 1 then
+      return "vanilla"
+    end
+    if result.play_sound_notes_at_peak == 1 then
+      return "play_sound"
+    end
+    return "custom"
+  end
+
+  -- The bucket instrument_table.resolve() implies for the same pair.
+  local function expected_bucket(instrument, count)
+    local kind = instrument_table.resolve(instrument, count).kind
+    if kind == "play_note" then
+      return "vanilla"
+    end
+    return kind
+  end
+
+  it("17. CROSS PRODUCT: counts {10,16,17,18,19,20} x ids {0,15,16,17,19,20,25} classify identically in analyze and resolve", function()
+    local counts = { 10, 16, 17, 18, 19, 20 }
+    local ids = { 0, 15, 16, 17, 19, 20, 25 }
+    local rows = {}
+    for count_index = 1, #counts do
+      local count = counts[count_index]
+      for id_index = 1, #ids do
+        local id = ids[id_index]
+        local observed = observed_bucket(id, count)
+        local expected = expected_bucket(id, count)
+        expect.equal(observed, expected)
+        rows[#rows + 1] = string.format("%d/%d=%s", count, id, observed)
+      end
+    end
+    io.write("    CASE17 cross product: " .. table.concat(rows, " ") .. "\n")
+  end)
+
+  it("18. LEGACY v0 (count 10): ids 10..15 are CUSTOM, so they inflate neither the vanilla bucket nor the requirement", function()
+    local result = analyze.analyze(song({
+      vic = 10,
+      notes = {
+        n(0, 0, 45), n(0, 1, 45), n(0, 2, 45),
+        n(0, 10, 45), n(0, 11, 45), n(0, 12, 45),
+        n(0, 13, 45), n(0, 14, 45), n(0, 15, 45),
+      },
+    }))
+
+    expect.equal(result.peak_concurrent, 9)
+    expect.equal(result.vanilla_notes_at_peak, 3)
+    expect.equal(result.play_sound_notes_at_peak, 0)
+
+    -- One speaker is enough; counting ids 10..15 as vanilla (9 at peak) would
+    -- wrongly demand two speakers and raise a bogus speakers warning.
+    local assessed = speakers.assess(result, 1)
+    expect.equal(assessed.required, 1)
+    expect.equal(assessed.sufficient, true)
+
+    io.write(string.format(
+      "    CASE18 legacy count=10: peak=%d vanilla=%d playSound=%d required=%d sufficient=%s\n",
+      result.peak_concurrent, result.vanilla_notes_at_peak,
+      result.play_sound_notes_at_peak, assessed.required,
+      tostring(assessed.sufficient)))
+  end)
+
+  it("19. TRUMPET BOUNDARY (counts 17..19): id 16 is play_sound and adds a whole speaker-tick", function()
+    local counts = { 17, 18, 19 }
+    for count_index = 1, #counts do
+      local count = counts[count_index]
+      local result = analyze.analyze(song({
+        vic = count,
+        notes = { n(0, 0, 45), n(0, 16, 45) },
+      }))
+
+      expect.equal(result.peak_concurrent, 2)
+      expect.equal(result.vanilla_notes_at_peak, 1)
+      expect.equal(result.play_sound_notes_at_peak, 1)
+
+      -- ceil(1/8) + 1 == 2: the trumpet needs its OWN speaker-tick.
+      local assessed = speakers.assess(result, 2)
+      expect.equal(assessed.required, 2)
+      expect.equal(assessed.sufficient, true)
+
+      io.write(string.format(
+        "    CASE19 count=%d: vanilla=%d playSound=%d required=%d\n",
+        count, result.vanilla_notes_at_peak, result.play_sound_notes_at_peak,
+        assessed.required))
+    end
   end)
 end)
 

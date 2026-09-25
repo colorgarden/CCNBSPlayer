@@ -167,7 +167,65 @@ local function refusing_mock(side)
 end
 
 local function count_of(assignment, side)
-  return #assignment.by_speaker[side]
+  local bucket = assignment.by_speaker[side]
+  if bucket == nil then
+    return 0
+  end
+  return #bucket
+end
+
+-- Concatenate two event arrays, preserving each input's frozen order.
+local function concat(first, second)
+  local events = {}
+  for index = 1, #first do
+    events[#events + 1] = first[index]
+  end
+  for index = 1, #second do
+    events[#events + 1] = second[index]
+  end
+  return events
+end
+
+-- events_within(list, index): how many events of the same speaker list share a
+-- span with list[index] -- i.e. are STRICTLY less than 50 ms away from it.
+-- This runs the capacity predicate on the ASSIGNMENT, not on the input.
+local function events_within(list, index)
+  local pivot = list[index].t_ms
+  if type(pivot) ~= "number" then
+    pivot = 0
+  end
+  local count = 0
+  for other = 1, #list do
+    local t_ms = list[other].t_ms
+    if type(t_ms) ~= "number" then
+      t_ms = 0
+    end
+    if math.abs(t_ms - pivot) < 50 then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+-- assert_window_invariant(assignment): walk by_speaker and prove the sliding
+-- capacity invariant DIRECTLY on the result: no assigned event shares a 50 ms
+-- span with more than 8 events, and a play_sound shares its span with nothing
+-- at all (its own span holds exactly one event).
+local function assert_window_invariant(assignment)
+  local sides = { "left", "right" }
+  for _, side in ipairs(sides) do
+    local list = assignment.by_speaker[side]
+    if list == nil then
+      list = {}
+    end
+    for index = 1, #list do
+      local in_span = events_within(list, index)
+      expect.truthy(in_span <= 8)
+      if list[index].kind == "play_sound" then
+        expect.equal(in_span, 1)
+      end
+    end
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -637,5 +695,171 @@ describe("fanout.play integration", function()
     io.write(string.format(
       "    CASE-15 refusals: calls_made=%d refused=%d recorded=%d\n",
       played.calls_made, played.refused, #record.calls))
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 16-21. THE SLIDING 50 ms WINDOW (B1)
+--
+-- Regression: the allocator's capacity check used FIXED buckets
+-- (floor(t_ms / 50)), but nbs/analyze.lua measures concurrency with a SLIDING
+-- strict `< 50` window.  t=40 and t=50 are 10 ms apart and genuinely compete
+-- for one speaker-tick, yet floor() put them in different buckets -- so the
+-- allocator placed 9 notes on one speaker (the 9th is refused in game and
+-- silently lost).  These cases pin the sliding predicate and, in case 21, walk
+-- by_speaker to prove the invariant on the assignment itself.
+-- ---------------------------------------------------------------------------
+
+describe("fanout assign: sliding 50 ms window (B1)", function()
+  it("16. REPRO: 1 note at t=40 + 15 at t=50 need BOTH speakers -- 8/8, nothing dropped, nothing over 8", function()
+    local speakers = two_speakers()
+    local events = concat(burst(1, 40), burst(15, 50))
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 16, peak_concurrent = 16 }), speakers)
+
+    expect.equal(result.dropped, 0)
+    expect.equal(count_of(result, "left"), 8)
+    expect.equal(count_of(result, "right"), 8)
+    expect.equal(result.warning_code, nil)
+    assert_window_invariant(result)
+
+    io.write(string.format(
+      "    CASE-16 repro 2 speakers: left=%d right=%d dropped=%d warning=%s\n",
+      count_of(result, "left"), count_of(result, "right"), result.dropped,
+      tostring(result.warning_code)))
+  end)
+
+  it("17. the same input on ONE speaker keeps 8 and drops the other 8 with the speakers warning", function()
+    local speakers = { speaker.mock("left") }
+    local events = concat(burst(1, 40), burst(15, 50))
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 16, peak_concurrent = 16 }), speakers)
+
+    expect.equal(result.dropped, 8)
+    expect.equal(count_of(result, "left"), 8)
+    expect.equal(#result.dropped_events, 8)
+    expect.equal(result.warning_code, "speakers")
+    expect.equal(result.warning_args.dropped, 8)
+    -- The retained eight are the t=40 note plus the FIRST seven t=50 notes;
+    -- every loser is a later t=50 note (later in frozen order).
+    expect.equal(result.by_speaker["left"][1].t_ms, 40)
+    for index = 1, #result.dropped_events do
+      expect.equal(result.dropped_events[index].t_ms, 50)
+    end
+    assert_window_invariant(result)
+
+    io.write(string.format(
+      "    CASE-17 repro 1 speaker: left=%d dropped=%d first_loser_t=%d\n",
+      count_of(result, "left"), result.dropped,
+      result.dropped_events[1].t_ms))
+  end)
+
+  it("18. STRICT BOUNDARY: t=0 and t=50 are exactly 50 ms apart -- different spans, one speaker holds all 16", function()
+    local speakers = { speaker.mock("left") }
+    local events = concat(burst(8, 0), burst(8, 50))
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 16, peak_concurrent = 16 }), speakers)
+
+    expect.equal(result.dropped, 0)
+    expect.equal(count_of(result, "left"), 16)
+    assert_window_invariant(result)
+
+    io.write(string.format(
+      "    CASE-18 strict boundary diff=50: left=%d dropped=%d\n",
+      count_of(result, "left"), result.dropped))
+  end)
+
+  it("19. NEAR BOUNDARY: t=0 and t=49 share a span -- one speaker keeps 8 and drops the other 8", function()
+    local speakers = { speaker.mock("left") }
+    local events = concat(burst(8, 0), burst(8, 49))
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 16, peak_concurrent = 16 }), speakers)
+
+    expect.equal(result.dropped, 8)
+    expect.equal(count_of(result, "left"), 8)
+    expect.equal(result.warning_code, "speakers")
+    assert_window_invariant(result)
+
+    io.write(string.format(
+      "    CASE-19 near boundary diff=49: left=%d dropped=%d\n",
+      count_of(result, "left"), result.dropped))
+  end)
+
+  it("20. NO REGRESSION: 10/2 splits 5-5, 8/1 is legal, 9/1 drops exactly the last in frozen order", function()
+    local ten = fanout.assign(burst(10, 0),
+      analysis({ vanilla_notes_at_peak = 10, peak_concurrent = 10 }),
+      two_speakers())
+    expect.equal(count_of(ten, "left"), 5)
+    expect.equal(count_of(ten, "right"), 5)
+    expect.equal(ten.dropped, 0)
+
+    local eight = fanout.assign(burst(8, 0),
+      analysis({ vanilla_notes_at_peak = 8, peak_concurrent = 8 }),
+      { speaker.mock("left") })
+    expect.equal(eight.dropped, 0)
+    expect.equal(count_of(eight, "left"), 8)
+
+    local nine = fanout.assign(burst(9, 0),
+      analysis({ vanilla_notes_at_peak = 9, peak_concurrent = 9 }),
+      { speaker.mock("left") })
+    expect.equal(nine.dropped, 1)
+    expect.equal(count_of(nine, "left"), 8)
+    expect.equal(nine.dropped_events[1].note_index, 9)
+
+    io.write(string.format(
+      "    CASE-20 no-regression: 10/2=%d-%d 8/1_dropped=%d 9/1_dropped=%d loser=%d\n",
+      count_of(ten, "left"), count_of(ten, "right"), eight.dropped, nine.dropped,
+      nine.dropped_events[1].note_index))
+  end)
+
+  it("21. INVARIANT WALK: every 50 ms span on the assignment holds <= 8 events and a play_sound holds its span alone", function()
+    local with_sound = {
+      event({ kind = "play_sound", name = "trumpet", key = 45, t_ms = 0,
+        layer_index = 0, note_index = 1 }),
+      event({ t_ms = 0, layer_index = 1, note_index = 1, name = "a" }),
+      event({ t_ms = 0, layer_index = 2, note_index = 1, name = "b" }),
+      event({ t_ms = 49, layer_index = 0, note_index = 1, name = "c" }),
+      event({ t_ms = 49, layer_index = 1, note_index = 1, name = "d" }),
+      event({ t_ms = 50, layer_index = 0, note_index = 1, name = "e" }),
+      event({ t_ms = 50, layer_index = 1, note_index = 1, name = "f" }),
+    }
+    local cases = {
+      { name = "repro-2spk", events = concat(burst(1, 40), burst(15, 50)),
+        speakers = two_speakers() },
+      { name = "repro-1spk", events = concat(burst(1, 40), burst(15, 50)),
+        speakers = { speaker.mock("left") } },
+      { name = "near-boundary", events = concat(burst(8, 0), burst(8, 49)),
+        speakers = { speaker.mock("left") } },
+      { name = "sound-mixed", events = with_sound, speakers = two_speakers() },
+    }
+
+    local sounds_assigned = 0
+    for index = 1, #cases do
+      local probe = cases[index]
+      local result = fanout.assign(probe.events,
+        analysis({ vanilla_notes_at_peak = 16, play_sound_notes_at_peak = 1,
+          peak_concurrent = 16 }), probe.speakers)
+      assert_window_invariant(result)
+
+      local sides = { "left", "right" }
+      for _, side in ipairs(sides) do
+        local list = result.by_speaker[side] or {}
+        for position = 1, #list do
+          if list[position].kind == "play_sound" then
+            sounds_assigned = sounds_assigned + 1
+          end
+        end
+      end
+      io.write(string.format(
+        "    CASE-21 %-14s left=%d right=%d dropped=%d\n",
+        probe.name, count_of(result, "left"), count_of(result, "right"),
+        result.dropped))
+    end
+    -- Prove the play_sound half of the walk was not vacuous.
+    expect.truthy(sounds_assigned >= 1)
   end)
 end)

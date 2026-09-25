@@ -236,6 +236,59 @@ describe("nbs.instrument_table.resolve -- vanilla-count boundary", function()
   end)
 end)
 
+-- ---------------------------------------------------------------------------
+-- 18-20. bucket_of -- the shared classifier (the ONE owner of the rule)
+--
+-- analyze.lua and resolve() must classify an (id, count) pair identically.
+-- bucket_of is that single classifier; resolve() maps its answer to a call.
+-- ---------------------------------------------------------------------------
+
+describe("nbs.instrument_table.bucket_of -- the single classification owner", function()
+  it("18. bucket_of is total over the cross product and agrees with resolve", function()
+    local counts = { 10, 16, 17, 18, 19, 20 }
+    local ids = { 0, 15, 16, 17, 19, 20, 25 }
+
+    for _, count in ipairs(counts) do
+      for _, id in ipairs(ids) do
+        local bucket = instrument_table.bucket_of(id, count)
+        expect.truthy(bucket == "vanilla" or bucket == "play_sound"
+          or bucket == "custom")
+
+        local kind = instrument_table.resolve(id, count).kind
+        if kind == "play_note" then
+          expect.equal(bucket, "vanilla")
+        else
+          expect.equal(bucket, kind)
+        end
+      end
+    end
+  end)
+
+  it("19. DEFENSIVE: a nil or non-numeric vanilla count falls back to the documented 16 boundary, never raises", function()
+    -- Documented contract: a missing/non-numeric count is treated as the
+    -- v1..v5 boundary of 16 (ids 0..15 vanilla, 16+ custom).  analyze.lua has
+    -- always classified a missing count that way, so both modules stay in step.
+    expect.deep_equal(instrument_table.resolve(5, nil),
+      { kind = "play_note", name = "guitar" })
+    expect.deep_equal(instrument_table.resolve(16, nil),
+      { kind = "custom", custom_index = 0 })
+    expect.deep_equal(instrument_table.resolve(19, nil),
+      { kind = "custom", custom_index = 3 })
+    expect.deep_equal(instrument_table.resolve(5, "not a number"),
+      { kind = "play_note", name = "guitar" })
+
+    expect.equal(instrument_table.bucket_of(5, nil), "vanilla")
+    expect.equal(instrument_table.bucket_of(15, nil), "vanilla")
+    expect.equal(instrument_table.bucket_of(16, nil), "custom")
+  end)
+
+  it("20. a non-numeric instrument id is CUSTOM (total, never raises)", function()
+    expect.equal(instrument_table.bucket_of(nil, 16), "custom")
+    expect.equal(instrument_table.resolve(nil, 16).kind, "custom")
+    expect.equal(instrument_table.resolve(nil, 16).custom_index, nil)
+  end)
+end)
+
 describe("nbs.instrument_table.resolve -- fuzz sweep over ids 0..255", function()
   it("17. every id lands in exactly one kind, and the kind rules hold", function()
     -- vanilla_instrument_count 10 (v0), 16 (v1..v5) and 20 (v6).

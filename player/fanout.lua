@@ -35,39 +35,53 @@
 --   dispatch results, in call order).
 --
 -- ===========================================================================
--- THE CAPACITY UNIT IS A 50 ms WINDOW -- NOT A TICK, NOT THE WHOLE SONG
+-- THE CAPACITY UNIT IS A SLIDING 50 ms WINDOW -- NOT A BUCKET, NOT A TICK
 -- ===========================================================================
 -- A speaker's per-tick budget is measured on GAME time, and one Minecraft game
 -- tick is 50 ms -- a DIFFERENT clock from the NBS tick (see nbs/analyze.lua).
--- The window here is therefore measured on `event.t_ms`, is 50 ms wide, and is
--- discretised as `window = floor(t_ms / 50)` -- so two events compete ONLY when
--- their start times land in the SAME 50 ms window.  A gap of exactly 50 ms puts
--- them in different windows, matching analyze's STRICT `<` boundary.  The plan's
--- frozen order is ascending by tick_index, and t_ms = tick_index * tick_ms, so
--- the window index is non-decreasing across the walk.
+-- The window here is therefore measured on `event.t_ms`: two events compete for
+-- the SAME speaker-tick exactly when their start times are STRICTLY less than
+-- 50 ms apart (`math.abs(t1 - t2) < 50`).  That is the SAME predicate
+-- nbs/analyze.lua uses to compute `peak_concurrent`; the two modules must never
+-- drift apart, or fanout will place events the analyzer did not budget for (and
+-- the speaker, refusing the 9th call, silently loses them).
 --
--- Per window, per speaker:
---   * a `play_note` consumes ONE of the speaker's MAX_NOTES_PER_TICK (8) slots;
---   * a `play_sound` consumes the ENTIRE speaker for that window -- a speaker
---     cannot emit a playSound and anything else in the same game tick, so a
---     window that holds a play_sound is closed to every other event;
+-- HISTORY -- WHY THIS IS NOT `floor(t_ms / 50)`: fixed buckets are NOT
+-- equivalent to the sliding test.  t=40 and t=50 fall in buckets 0 and 1, yet
+-- they are 10 ms apart and genuinely compete for one speaker-tick, so bucketing
+-- allowed NINE notes on one speaker whenever a burst straddled a bucket edge.
+-- The comparison below is against the ACTUAL assigned times, never a bucket.
+-- A gap of exactly 50 ms starts a new span; a gap of 49 ms does not.
+--
+-- Per event, per speaker (measured against the events ALREADY assigned to that
+-- speaker):
+--   * a `play_note` consumes ONE of the speaker's MAX_NOTES_PER_TICK (8) slots:
+--     it needs fewer than 8 notes already within 50 ms of it, and no play_sound;
+--   * a `play_sound` consumes the ENTIRE speaker for that span -- it needs NO
+--     event at all within 50 ms, and then closes the speaker to every event
+--     until that event is at least 50 ms away;
 --   * a `custom` event consumes NOTHING.  It is refused at dispatch, so it must
 --     NEVER trigger a drop; it is passed through (assigned to the first speaker)
 --     so the recorded call order stays a faithful projection of the plan.
 --   * an unknown/missing `kind` likewise consumes nothing.
 --
+-- The plan's frozen order is ascending by (tick_index, layer_index, note_index)
+-- and t_ms = tick_index * tick_ms, so the walk sees NON-DECREASING t_ms.  That
+-- lets an entry that is already 50 ms (or more) behind the current event be
+-- retired for good: it is behind every later event too.
+--
 -- ===========================================================================
 -- ASSIGNMENT POLICY: STABLE GREEDY LEAST-LOADED, ASCENDING-SIDE TIE-BREAK
 -- ===========================================================================
 -- Walk the events in their given (frozen) order.  For each `play_note`, pick
--- the speaker with the FEWEST notes already assigned in that event's window;
--- ties break to the speaker whose `side` sorts FIRST.  Because `speakers` is
--- already ascending by side, iterating it from index 1 with a strict `<`
--- improvement test resolves a tie to the earliest speaker in the array.
+-- the speaker with the FEWEST notes already within 50 ms of it; ties break to
+-- the speaker whose `side` sorts FIRST.  Because `speakers` is already
+-- ascending by side, iterating it from index 1 with a strict `<` improvement
+-- test resolves a tie to the earliest speaker in the array.
 --
--- A `play_sound` needs a speaker with NOTHING else in that window (window count
--- 0); if no speaker is empty it is dropped.  With several empty speakers the
--- first (ascending side) wins -- which least-loaded would also give, since all
+-- A `play_sound` needs a speaker with NOTHING else within 50 ms of it; if no
+-- speaker is free it is dropped.  With several free speakers the first
+-- (ascending side) wins -- which least-loaded would also give, since all
 -- candidates are at 0.
 --
 -- ===========================================================================
@@ -121,9 +135,9 @@ local function consumes(kind)
   return kind == "play_note" or kind == "play_sound"
 end
 
--- The 50 ms window that `event.t_ms` falls in.  A missing/non-numeric t_ms is
+-- time_of(event): the event's start time in ms.  A missing/non-numeric t_ms is
 -- treated as 0 so hostile input can never raise.
-local function window_of(event)
+local function time_of(event)
   local t_ms = nil
   if type(event) == "table" then
     t_ms = event.t_ms
@@ -131,7 +145,16 @@ local function window_of(event)
   if type(t_ms) ~= "number" then
     t_ms = 0
   end
-  return math.floor(t_ms / WINDOW_MS)
+  return t_ms
+end
+
+-- within_window(a, b): THE capacity predicate.  Two events compete for one
+-- speaker-tick exactly when their start times are STRICTLY less than one 50 ms
+-- game tick apart.  This must stay identical to the strict `< 50` test in
+-- nbs/analyze.lua; drift between the two is what let fanout overload a speaker
+-- the analyzer had already budgeted for.
+local function within_window(a, b)
+  return math.abs(a - b) < WINDOW_MS
 end
 
 -- allocate(events, speakers) -> owner, where owner[i] is the speaker record
@@ -142,18 +165,61 @@ local function allocate(events, speakers)
   local total_events = #events
   local total_speakers = #speakers
 
-  -- Per-speaker window bookkeeping, indexed by the speaker's array position so
-  -- no hash-table iteration ever touches it.
-  --   count[k]           notes assigned in speaker k's current window
-  --   seen_window[k]     which window count[k] belongs to
-  --   occupied_window[k] the window a play_sound closed for speaker k
-  local count = {}
-  local seen_window = {}
-  local occupied_window = {}
+  -- Per-speaker sliding-window bookkeeping, indexed by the speaker's array
+  -- position so no hash-table iteration ever touches it.
+  --   times[k]   start times (ms) of the events assigned to speaker k, in
+  --              assignment order (non-decreasing: the frozen plan is ascending)
+  --   sounds[k]  parallel flag: true when that entry is a play_sound
+  --   head[k]    1-based index of speaker k's first entry that can still share
+  --              a window with the current event; everything before it is at
+  --              least 50 ms behind and can never compete again.
+  local times = {}
+  local sounds = {}
+  local head = {}
   for k = 1, total_speakers do
-    count[k] = 0
-    seen_window[k] = nil
-    occupied_window[k] = nil
+    times[k] = {}
+    sounds[k] = {}
+    head[k] = 1
+  end
+
+  -- retire(k, t): drop speaker k's entries that are already out of reach at
+  -- time t.  The walk is in non-decreasing t_ms order, so once an entry is
+  -- 50 ms (or more) behind t it is behind every later event too.  The test is
+  -- the boundary of the same strict `< 50` predicate, on actual times.
+  local function retire(k, t)
+    local list = times[k]
+    local first = head[k]
+    while first <= #list and list[first] <= t
+      and not within_window(list[first], t) do
+      first = first + 1
+    end
+    head[k] = first
+  end
+
+  -- live_count(k, t): how many of speaker k's entries share a 50 ms span with
+  -- t.  After retire() the remaining entries are the live ones, so the abs()
+  -- test only re-confirms what retirement already established.
+  local function live_count(k, t)
+    local list = times[k]
+    local count = 0
+    for index = head[k], #list do
+      if within_window(list[index], t) then
+        count = count + 1
+      end
+    end
+    return count
+  end
+
+  -- live_sound(k, t): is one of speaker k's live entries a play_sound?
+  local function live_sound(k, t)
+    local list = times[k]
+    local flags = sounds[k]
+    for index = head[k], #list do
+      if flags[index] and within_window(list[index], t) then
+        return true
+      end
+    end
+    return false
   end
 
   local owner = {}
@@ -164,46 +230,47 @@ local function allocate(events, speakers)
     if type(event) == "table" then
       kind = event.kind
     end
-    local window = window_of(event)
+    local t = time_of(event)
 
     if kind == "play_note" then
-      -- Stable greedy least-loaded: strict `<` keeps the earliest (ascending
-      -- side) speaker on a tie.
+      -- Stable greedy least-loaded: count the notes already within 50 ms of
+      -- this event; a strict `<` improvement test keeps the earliest
+      -- (ascending side) speaker on a tie.
       local best = nil
       local best_count = nil
       for k = 1, total_speakers do
-        if seen_window[k] ~= window then
-          seen_window[k] = window
-          count[k] = 0
-        end
-        if occupied_window[k] ~= window and count[k] < MAX_NOTES_PER_WINDOW then
-          if best == nil or count[k] < best_count then
+        retire(k, t)
+        if not live_sound(k, t) then
+          local load = live_count(k, t)
+          if load < MAX_NOTES_PER_WINDOW
+            and (best == nil or load < best_count) then
             best = k
-            best_count = count[k]
+            best_count = load
           end
         end
       end
       if best ~= nil then
-        count[best] = count[best] + 1
+        local list = times[best]
+        list[#list + 1] = t
+        sounds[best][#sounds[best] + 1] = false
         owner[i] = speakers[best]
       end
 
     elseif kind == "play_sound" then
-      -- Needs a speaker with NOTHING else in this window.  First empty speaker
-      -- (ascending side) wins; if none is empty the event is dropped.
+      -- Needs a speaker with NOTHING within 50 ms.  First free speaker
+      -- (ascending side) wins; if none is free the event is dropped.
       local best = nil
       for k = 1, total_speakers do
-        if seen_window[k] ~= window then
-          seen_window[k] = window
-          count[k] = 0
-        end
-        if best == nil and occupied_window[k] ~= window and count[k] == 0 then
+        retire(k, t)
+        if live_count(k, t) == 0 then
           best = k
+          break
         end
       end
       if best ~= nil then
-        occupied_window[best] = window
-        count[best] = MAX_NOTES_PER_WINDOW
+        local list = times[best]
+        list[#list + 1] = t
+        sounds[best][#sounds[best] + 1] = true
         owner[i] = speakers[best]
       end
 

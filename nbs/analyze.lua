@@ -13,8 +13,8 @@
 --     tick_ms                  number   1000 / ticks_per_second
 --     peak_concurrent          integer  max simultaneous notes in any 50 ms window
 --     peak_window_ms           integer  50 (constant)
---     vanilla_notes_at_peak    integer  peak-window notes with instrument id 0..15
---     play_sound_notes_at_peak integer  peak-window notes with id 16..19 when v6
+--     vanilla_notes_at_peak    integer  peak-window notes classified "vanilla"
+--     play_sound_notes_at_peak integer  peak-window notes classified "play_sound"
 --     has_extended_range       boolean  true when ANY key is outside 33..57
 --     min_key, max_key         integer  over all notes (0 and 0 when there are none)
 --     loop = { loop, max_loop_count, loop_start_tick }  copied from the header
@@ -53,13 +53,19 @@
 --      always attained by a window whose left edge sits on some note).
 --
 -- INSTRUMENT BUCKETS (only the chosen peak window is classified)
---   vanilla     instrument id 0..15
---   play_sound  instrument id 16..19 AND 19 < header.vanilla_instrument_count
---               (the v6 "trumpet"-style native sounds live above the v5 table)
---   custom      anything else -- refused at playback, so it counts toward
---               NEITHER bucket.  It still counts in peak_concurrent because it
---               is a simultaneous note; it just must not inflate the speaker
---               requirement for the buckets the player can actually schedule.
+--   The classification rule has ONE owner: nbs/instrument_table.bucket_of --
+--   the same classifier player/plan.lua reaches through resolve().  A
+--   re-implementation here (hardcoded 0..15 / 16..19 constants) previously
+--   DISAGREED with resolve for vanilla counts 10 and 17..19, which
+--   under-budgeted speakers for v6 trumpets and produced a bogus "speakers"
+--   warning for legacy custom ids.  Delegating keeps the analyzer's budget
+--   identical to the calls the player will actually make:
+--     vanilla     below the file's vanilla boundary, id 0..15
+--     play_sound  16..19 below that boundary (the v6 "trumpet" native sounds)
+--     custom      anything else -- refused at playback, so it counts toward
+--                 NEITHER bucket.  It still counts in peak_concurrent because
+--                 it is a simultaneous note; it just must not inflate the
+--                 speaker requirement for the buckets the player can schedule.
 --
 -- TIE-BREAK (deterministic)
 --   When several distinct windows attain the same maximum, the reported bucket
@@ -70,6 +76,8 @@
 -- Lua 5.2 / Cobalt constraints honoured: no `//`, no bitwise operators, no
 -- utf8.*, no math.maxinteger, no collectgarbage, no string.dump, no os.exit.
 
+local instrument_table = require("nbs.instrument_table")
+
 local analyze = {}
 
 -- One Minecraft game tick, in milliseconds.  This is the speaker-ceiling window.
@@ -78,31 +86,6 @@ local PEAK_WINDOW_MS = 50
 -- Native two-octave key range (33 = F#3, 45 = F#4, 57 = F#5), inclusive.
 local RANGE_MIN_KEY = 33
 local RANGE_MAX_KEY = 57
-
--- Instrument id table boundaries (see the module header).
-local VANILLA_MAX_ID = 15
-local PLAY_SOUND_MIN_ID = 16
-local PLAY_SOUND_MAX_ID = 19
-
--- Classify one instrument id into "vanilla" | "play_sound" | nil (custom).
--- `vanilla_instrument_count` is the index at which custom instruments start;
--- ids 16..19 are native playSound sounds only when the count reaches past 19
--- (i.e. a v6 file with 20 vanilla instruments).  A v5 file reports 16, so ids
--- 16..19 are custom there and fall through both buckets.
-local function bucket_of(instrument, vanilla_instrument_count)
-  if type(instrument) ~= "number" then
-    return nil
-  end
-  if instrument <= VANILLA_MAX_ID then
-    return "vanilla"
-  end
-  if instrument >= PLAY_SOUND_MIN_ID and instrument <= PLAY_SOUND_MAX_ID
-    and type(vanilla_instrument_count) == "number"
-    and vanilla_instrument_count > PLAY_SOUND_MAX_ID then
-    return "play_sound"
-  end
-  return nil
-end
 
 -- analyze.analyze(song) -> result
 function analyze.analyze(song)
@@ -176,7 +159,10 @@ function analyze.analyze(song)
   local play_sound_at_peak = 0
   if peak_left ~= nil and peak > 0 then
     for index = peak_left, peak_left + peak - 1 do
-      local bucket = bucket_of(items[index].instrument,
+      -- ONE classifier: the very same function player/plan.lua reaches through
+      -- instrument_table.resolve, so the analyzer and the allocator can never
+      -- disagree about which notes need a playNote and which need a playSound.
+      local bucket = instrument_table.bucket_of(items[index].instrument,
         header.vanilla_instrument_count)
       if bucket == "vanilla" then
         vanilla_at_peak = vanilla_at_peak + 1
