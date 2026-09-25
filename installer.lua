@@ -156,8 +156,10 @@ installer.RUNTIME_FILES = {
   "player/tui.lua",
   "player/warnings.lua",
   "net/http.lua",
+  "net/nbw.lua",
   "net/zip.lua",
   "ui/i18n.lua",
+  "ui/presenter.lua",
 }
 
 -- ---------------------------------------------------------------------------

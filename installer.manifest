@@ -41,7 +41,9 @@ player/warnings.lua
 
 # Net modules required by the runtime.
 net/http.lua
+net/nbw.lua
 net/zip.lua
 
-# Shared i18n layer.
+# UI layer: the i18n tables and the pure presentation logic.
 ui/i18n.lua
+ui/presenter.lua
