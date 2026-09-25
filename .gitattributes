@@ -3,11 +3,11 @@
 # HTTP; CRLF in Lua sources is undesirable, so keep the repository LF-only.
 * text=auto eol=lf
 
-# Binary fixtures and assets must never be line-ending converted.
+# Binary fixtures must never be line-ending converted.
+# Only .nbs is used (the fixture/corpus format).  This project ships no audio
+# files of any kind -- it only schedules note calls -- so there are no
+# *.dfpwm / *.ogg / *.wav attributes to declare here.
 *.nbs binary
-*.dfpwm binary
-*.ogg binary
-*.wav binary
 
 # Windows-only helper scripts keep native CRLF.
 *.ps1 text eol=crlf

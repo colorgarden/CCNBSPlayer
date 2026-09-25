@@ -102,16 +102,32 @@ INGAME version=1.0.0
 INGAME speakers=1
 INGAME file=/我的歌.nbs
 INGAME song=<曲名> notes=<音符数> peak=<峰值并发> tick_ms=<节拍毫秒>
-INGAME warn=WARN[...] ...
-INGAME status=ok speakers=1 song=<曲名> notes=... events=... warnings=0
+INGAME warn=WARN[<code>] <中文说明>   ← 命中一个警告码就一行；没有警告时没有这一行
+INGAME status=ok speakers=1 song=<曲名> notes=... events=... warnings=<警告数>
+INGAME warncode=<code>                ← 每个警告码再单独一行；没有警告时没有
 ```
+
+`warnings=` 就是上面 `INGAME warn=`（以及末尾 `INGAME warncode=`）的**条数**，三者必须
+自洽：`warnings=0` 时**不出现**任何 `warn=` / `warncode=` 行；一旦出现 `warn=` 行，
+`warnings` 必然 `≥ 1`。
+
+例如 §3 用的 `compat_demo_song.nbs`（峰值 `3`、`tick_ms=100`、音符全在原生音域内）
+**不产生任何警告**，因此结尾打印 `warnings=0`，且**没有** `INGAME warn=` 行。若换成含
+越界音符的 `simple.nbs`，则会多出 `warnings=1` 与一行
+`INGAME warn=WARN[extended-range] ...`（见 §4）。
 
 **PASS 判据**
 
 - `INGAME speakers=` 至少为 `1`；
 - `INGAME status=ok`；
-- `events=` 与 `notes=` 数量一致（没有事件凭空丢失；自定义乐器与越界音高在真实
-  硬件上是**会发声**的，见 §4）。
+- `events=` 与 `notes=` 数量一致（没有事件凭空丢失）；
+- **自定义乐器音符不会发声（所有平台一致）**：`player/dispatch.lua` 对
+  `kind == "custom"` 的事件**不做任何扬声器调用**（`called=false`、`method=nil`），
+  只发一次 `WARN[custom-instrument]`。它们**仍会计入** `events=`，但扬声器上听不到——
+  这是**预期的拒绝行为**（见 §9）。
+- **越界音高的普通音符**在真实硬件上**会发声**（真实 CC:Tweaked 原样接受越界音高，
+  音色是否正确取决于扩展音域材质包），见 §4。
+  **注意区分**：只有「普通音符越界」会在真机发声；「自定义乐器」无论是否越界都**不发**。
 
 ---
 
@@ -132,7 +148,10 @@ INGAME status=ok speakers=1 song=<曲名> notes=... events=... warnings=0
 - 能听到按节拍依次敲出的音符盒音色；
 - 终端**没有** `WARN[speakers]`（单扬声器足够）；
 - 终端**没有** `WARN[extended-range]`；
-- 最后一行是 `INGAME status=ok`。
+- 终端**没有** `WARN[tempo-clamp]`——本曲 `tick_ms=100`（10 tps），本身并不细于
+  50 ms 计时粒度（该警告只对自身节拍快于 20 tps 的歌曲发出，见 `README.md` 的
+  「警告代码参考」）；
+- 最后一行是 `INGAME status=ok`，且其中的 `warnings=0`。
 
 **失败排查**
 
