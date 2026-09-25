@@ -28,14 +28,22 @@ than fetched at runtime because Basalt's modules resolve each other through
 `require`, which does not work from a directory that is not on `package.path`.
 See `vendor/README.md` for the provenance and how to verify it.
 
-4. Basalt 2 - https://github.com/Pyroxenium/Basalt2
-   Copyright (c) 2025 Pyroxenium
+4. Basalt 2 (fork build) - https://github.com/HKXingluo/Basalt2
+   A fork of Basalt 2 - https://github.com/Pyroxenium/Basalt2
+   Copyright (c) 2025 Pyroxenium (upstream); fork maintained by HKXingluo
    Licensed under the MIT License. Full text: `vendor/LICENSE-Basalt2`.
-   Vendored as: `vendor/basalt.lua` — the "Full" single-file bundle, verbatim from
-   upstream's published `release/basalt-full.lua` at commit
-   ba6c6911d2a317b452629faf77e55c7929857c73 (305,968 bytes, SHA256
-   4ce59622b7b4d5ec056a543859c91a080edd6cef5c64db8d9ddcfe0d0cf53859).
-   Used for: the entire user interface framework.
+   The fork keeps the upstream MIT licence.
+   WHY THE FORK: official Basalt 2 cannot render Chinese in its text elements --
+   a label or button only accepts plain text, drawn with CC's built-in font,
+   which has no CJK glyphs. The fork adds `setImage()` to text elements so they
+   can display a bimg bitmap. The reference project (MPlayer) is built on this
+   fork, and this project follows it. The fork is a superset, so code written
+   against official Basalt continues to work.
+   Vendored as: `vendor/basalt.lua` — verbatim from the fork's published
+   `release/basalt-full.lua` at commit
+   5adef1851b1aba4cd21f566f826a7f0194a24b42 (324,622 bytes, SHA256
+   5a273409fce6baaa89ae17d72332f4ad6e3c4232c3e3e426276cdbfa33a6d538).
+   Used for: the entire user interface framework, including the installer's GUI.
 
 5. ComputerCraft-Utf8 (`utf8display`) - https://git.liulikeji.cn/xingluo/ComputerCraft-Utf8
    Copyright (c) the ComputerCraft-Utf8 author (xingluo / HKXingluo)

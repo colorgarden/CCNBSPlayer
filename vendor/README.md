@@ -12,60 +12,84 @@ single self-contained file; this directory does the same.
 
 ---
 
-## `basalt.lua` — Basalt 2 (single-file bundle)
+## `basalt.lua` — Basalt 2 (single-file bundle), the *fork* build
 
 | | |
 |---|---|
-| Upstream | https://github.com/Pyroxenium/Basalt2 |
-| Pinned commit | `ba6c6911d2a317b452629faf77e55c7929857c73` |
-| Licence | MIT — full text in `LICENSE-Basalt2` |
-| Source | upstream's **published release artifact**, `release/basalt-full.lua`, at that commit |
-| Size | 305,968 bytes |
-| SHA256 | `4ce59622b7b4d5ec056a543859c91a080edd6cef5c64db8d9ddcfe0d0cf53859` |
+| Upstream | https://github.com/HKXingluo/Basalt2 — a **fork** of https://github.com/Pyroxenium/Basalt2 |
+| Pinned commit | `5adef1851b1aba4cd21f566f826a7f0194a24b42` |
+| Licence | MIT — full text in `LICENSE-Basalt2` (the fork keeps the upstream licence) |
+| Source | the fork's published `release/basalt-full.lua` at that commit |
+| Size | 324,622 bytes |
+| SHA256 | `5a273409fce6baaa89ae17d72332f4ad6e3c4232c3e3e426276cdbfa33a6d538` |
 
-Basalt 2 is a UI framework for CC:Tweaked. The **Full** variant is vendored, not
-Core, because the reactive layout engine behind expressions such as
-`"{parent.width - 2}"` is a *plugin*, and `config.lua` marks it `default = false`,
-so a Core bundle would exclude it. The framework's own documentation calls Core
-"recommended"; that is misleading for this project's needs, which is why Full is
-used here.
+### WHY THE FORK AND NOT OFFICIAL BASALT 2 — this is the whole point
 
-This is the same artifact the reference project (MPlayer) installs, which is why
-it is used here verbatim rather than rebuilt.
+**Official Basalt 2 cannot render Chinese in its text elements.** A label or a
+button only accepts plain text, which it draws through CC's `term.blit` using CC's
+built-in font — and that font has no CJK glyphs. There is no font hook and no
+per-element workaround: the text simply cannot contain Chinese.
+
+The fork adds exactly that missing capability: `setImage()` on text elements, so a
+label or button can display a **bimg** (the pixel-bitmap format) directly.
+
+This is not a preference. It is why the reference project (MPlayer) is built on
+the fork, and matching MPlayer was the requirement. The measured difference
+between the two builds at the time of writing:
+
+```text
+official  305,968 B   sha 4ce59622...   occurrences of "setImage": 0
+fork      324,622 B   sha 5a273409...   occurrences of "setImage": 5
+```
+
+The fork is a **superset**: the `Image` element and its `bimg` property are still
+present (occurrences of `bimg` rise from 19 to 31), so code written against
+official Basalt — including this project's own player view — keeps working.
+
+The fork is MIT, inherited from upstream, so it is redistributable on the same
+terms as the official build. Its author describes it as a proof of concept and
+does not intend to upstream it; that is noted here so a future maintainer
+understands why this is not simply "the latest Basalt release".
 
 ### Why it is bundled rather than shipped as separate files
 
 Basalt's modules call `require("main")`, `require("elements.Frame")` and so on.
 Those names only resolve if the directory holding them is on `package.path`.
-Committing the 58 sources as loose files under `/lib/vendor/basalt/` would require
+Committing the sources as loose files under `/lib/vendor/basalt/` would require
 manipulating `package.path` at load time from a path this project does not control.
 The bundle instead installs its own `require` shim at the top and resolves every
 module from an in-memory table, which is self-contained and path-independent.
 
 ### Verifying or re-obtaining it
 
-The file is the artifact upstream publishes, unmodified. To confirm it byte for
+The file is the artifact the fork publishes, unmodified. To confirm it byte for
 byte, or to fetch a fresh copy at the pinned commit:
 
 ```text
 curl -L -o basalt.lua \
-  https://raw.githubusercontent.com/Pyroxenium/Basalt2/ba6c6911d2a317b452629faf77e55c7929857c73/release/basalt-full.lua
+  https://raw.githubusercontent.com/HKXingluo/Basalt2/5adef1851b1aba4cd21f566f826a7f0194a24b42/release/basalt-full.lua
 sha256sum basalt.lua
-# expected: 4ce59622b7b4d5ec056a543859c91a080edd6cef5c64db8d9ddcfe0d0cf53859
+# expected: 5a273409fce6baaa89ae17d72332f4ad6e3c4232c3e3e426276cdbfa33a6d538
 ```
 
 Because the pinned COMMIT is named rather than the branch, this URL is immutable
-and the hash above stays valid. (The same file was also served from `main` when
-this was fetched, but `main` moves, so the commit is what is recorded.)
+and the hash above stays valid.
 
-Note on tooling: upstream's own `tools/bundler.lua` can rebuild a bundle from
-`src/`, but an early draft of this directory did exactly that and the result was
-**not** byte-identical — the module and stub declaration ORDER follows whatever
-order the file listing comes back in, and upstream's bundler enumerates files with
-`io.popen("find ...")`, which does not exist on Windows. The two bundles contained
-the same 58 modules with the same bodies and the same total size, so either would
-work, but the released artifact is preferred precisely because it removes that
-local build step and every question that comes with it.
+One check worth running after any change here, because it is the reason this
+build was chosen: `grep -c setImage basalt.lua` must NOT be 0. A build with zero
+`setImage` occurrences is official Basalt, and Chinese text in the interface will
+silently fail to render.
+
+Note on tooling, kept because it explains a decision: Basalt ships a
+`tools/bundler.lua` that rebuilds a bundle from `src/`. An early draft of this
+directory used it to rebuild the **official** bundle, and the result was not
+byte-identical to official's published artifact — the module and stub declaration
+ORDER follows whatever order the file listing comes back in, and that bundler
+enumerates files with `io.popen("find ...")`, which does not exist on Windows.
+Both contained the same 58 modules with the same bodies, so either would run, but
+the published artifact wins precisely because it removes a local build step and
+every question that comes with it. The fork is taken verbatim for the same reason;
+nothing here is rebuilt locally.
 
 `basalt.lua` is loaded with:
 
