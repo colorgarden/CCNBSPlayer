@@ -1,0 +1,47 @@
+# CCNBSPlayer installer manifest (format v1)
+#
+# One repository-relative path per line. Blank lines and lines whose first
+# non-space character is '#' are ignored; surrounding whitespace is trimmed;
+# duplicates are dropped (order preserved). Plain text -- no JSON, no quoting.
+# Parsed on the computer by installer.parse_manifest(text).
+#
+# The installer fetches this file from the repository base FIRST and installs
+# exactly these paths. If it cannot be fetched, installer.RUNTIME_FILES stands
+# in. tests/installer_manifest_spec.lua fails if EITHER list stops covering
+# every module the runtime `require`s, and if any entry here names a file that
+# does not exist. Runtime modules only: no tests/**, no scripts.
+
+# Entry programs (must sit beside the modules under /lib so require resolves).
+ccnbs.lua
+ccnbsplayer.lua
+
+# NBS decode/analyze modules.
+nbs/analyze.lua
+nbs/cp1252.lua
+nbs/decode.lua
+nbs/header.lua
+nbs/instrument_table.lua
+nbs/instruments_custom.lua
+nbs/layers.lua
+nbs/notes.lua
+nbs/reader.lua
+nbs/speakers.lua
+
+# Player runtime / UI modules.
+player/clock.lua
+player/dispatch.lua
+player/fanout.lua
+player/mapping.lua
+player/plan.lua
+player/runtime.lua
+player/speaker.lua
+player/tempo.lua
+player/tui.lua
+player/warnings.lua
+
+# Net modules required by the runtime.
+net/http.lua
+net/zip.lua
+
+# Shared i18n layer.
+ui/i18n.lua
