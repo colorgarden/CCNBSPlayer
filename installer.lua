@@ -117,6 +117,58 @@
 
 local installer = {}
 
+-- ===========================================================================
+-- BOOTSTRAP SHIM: make `package` and `shell` reachable from chunks we load
+-- ===========================================================================
+-- WHY THIS EXISTS -- it is the difference between a working GUI and a silent
+-- fall back to text.
+--
+-- A program started with `wget run` (or by the shell) receives `package` and
+-- `shell` through its ENVIRONMENT, not as direct keys of the global table:
+-- inside such a program `type(shell)` is "table" but `rawget(_G, "shell")` is
+-- nil.  The vendored Basalt bundle is compiled with `_G` as its environment, so
+-- it cannot see either one and dies on its first `package.path` access
+-- ("attempt to index global 'package'").
+--
+-- Measured on CraftOS-PC, loading the real vendored bundle:
+--     raw run     -> fail: basalt:58: attempt to index ...
+--     shimmed run -> ok, returns the basalt table
+--
+-- This is exactly why the reference implementation (MPlayer) opens with the
+-- same shim.  The difference here is that we COPY the real tables when they are
+-- reachable, instead of substituting empty ones, so Basalt gets functioning
+-- `shell.resolveProgram` etc. rather than stubs.
+--
+-- It must run at file scope, before anything is `load`ed.
+do
+  local real_package = package
+  if type(rawget(_G, "package")) ~= "table" then
+    _G.package = type(real_package) == "table" and real_package
+      or { path = "rom/?.lua;rom/?/init.lua;", loaded = {} }
+  end
+  if type(_G.package.loaded) ~= "table" then
+    _G.package.loaded = {}
+  end
+  if type(_G.package.path) ~= "string" then
+    _G.package.path = "rom/?.lua;rom/?/init.lua;"
+  end
+
+  local real_shell = shell
+  if type(rawget(_G, "shell")) ~= "table" then
+    _G.shell = type(real_shell) == "table" and real_shell or {}
+  end
+  if type(_G.shell.getRunningProgram) ~= "function" then
+    _G.shell.getRunningProgram = function()
+      return "installer.lua"
+    end
+  end
+  if type(_G.shell.resolveProgram) ~= "function" then
+    _G.shell.resolveProgram = function(path)
+      return path
+    end
+  end
+end
+
 -- The installed version.  Kept in lockstep with ccnbs.version.
 installer.VERSION = "1.0.0"
 
@@ -319,6 +371,8 @@ local L10N = {
       "preparing the graphical installer from {base} ...",
     ["installer.bootstrap.failed"] =
       "could not prepare the graphical installer; falling back to the text installer.",
+    ["installer.bootstrap.failed_named"] =
+      "graphical installer bootstrap: {name} failed ({detail})",
     ["installer.autostart.write"] =
       "autostart: wrote /startup.lua (the player starts automatically at boot).",
     ["installer.autostart.overwrite"] =
@@ -414,6 +468,8 @@ local L10N = {
     ["installer.choose.auto_selected"] = "自动模式：将使用第一个能答上的来源。",
     ["installer.bootstrap.loading"] = "正在从 {base} 准备图形安装程序……",
     ["installer.bootstrap.failed"] = "无法准备图形安装程序，改用文本安装器。",
+    ["installer.bootstrap.failed_named"] =
+      "图形安装程序引导失败：{name} 出错（{detail}）",
     ["installer.autostart.write"] = "开机自启动：已写入 /startup.lua（开机自动运行播放器）。",
     ["installer.autostart.overwrite"] = "开机自启动：已更新本安装器写入的 /startup.lua。",
     ["installer.autostart.delete"] = "开机自启动：已删除本安装器写入的 /startup.lua。",
@@ -1748,23 +1804,31 @@ function installer.bootstrap_fetch(env)
   end
 end
 
--- installer.load_source(compile, source, name) -> value | nil.  Compiles and
--- RUNS a fetched source chunk in the global environment (the bootstrap bundles
--- expect that).  Returns nil -- never raises -- on a compile or runtime error,
--- which sends the caller down the plain-text fallback.
+-- installer.load_source(compile, source, name) -> value | nil, error.
+--
+-- Compiles fetched Lua source and runs it, returning whatever it produced.
+--
+-- It REPORTS its error rather than swallowing it.  An earlier version returned a
+-- bare nil on any failure, which made a broken Basalt load indistinguishable
+-- from a missing file: the GUI quietly fell back to the text installer and the
+-- real cause ("attempt to index global 'package'") was never printed anywhere.
+-- A bootstrap that cannot say why it failed is worse than one that crashes.
 function installer.load_source(compile, source, name)
-  if type(compile) ~= "function" or type(source) ~= "string" then
-    return nil
+  if type(compile) ~= "function" then
+    return nil, "no compiler available"
   end
-  local chunk = compile(source, name, "t", _G)
+  if type(source) ~= "string" then
+    return nil, "no source to compile"
+  end
+  local chunk, compile_error = compile(source, name, "t", _G)
   if chunk == nil then
-    return nil
+    return nil, "compile failed: " .. tostring(compile_error)
   end
   local ok, value = pcall(chunk)
   if ok then
     return value
   end
-  return nil
+  return nil, "run failed: " .. tostring(value)
 end
 
 -- installer.choose_source(env, sources) -> sources', automatic.
@@ -1859,11 +1923,28 @@ function installer.run_interactive(parsed, env)
     return nil
   end
 
-  local basalt = installer.load_source(compile, basalt_body, "=basalt")
-  local utf8display = installer.load_source(compile, utf8_body, "=utf8display")
-  local app = installer.load_source(compile, app_body, "=installer_app")
+  local basalt, basalt_error = installer.load_source(compile, basalt_body, "=basalt")
+  local utf8display, utf8_error = installer.load_source(compile, utf8_body, "=utf8display")
+  local app, app_error = installer.load_source(compile, app_body, "=installer_app")
   if type(basalt) ~= "table" or type(app) ~= "table"
     or type(app.run) ~= "function" then
+    -- Say WHICH piece failed and why.  A bare "bootstrap failed" sent a real
+    -- bug ("attempt to index global 'package'") into hiding for several rounds.
+    if type(basalt) ~= "table" then
+      log(installer.tr("installer.bootstrap.failed_named",
+        { name = "Basalt", detail = tostring(basalt_error or "not a table") }))
+    end
+    if type(app) ~= "table" then
+      log(installer.tr("installer.bootstrap.failed_named",
+        { name = "installer_app", detail = tostring(app_error or "not a table") }))
+    elseif type(app.run) ~= "function" then
+      log(installer.tr("installer.bootstrap.failed_named",
+        { name = "installer_app.run", detail = "missing" }))
+    end
+    if type(utf8display) ~= "table" then
+      log(installer.tr("installer.bootstrap.failed_named",
+        { name = "utf8display", detail = tostring(utf8_error or "not a table") }))
+    end
     log(installer.tr("installer.bootstrap.failed"))
     return nil
   end
