@@ -59,7 +59,9 @@
 --     it needs fewer than 8 notes already within 50 ms of it, and no play_sound;
 --   * a `play_sound` consumes the ENTIRE speaker for that span -- it needs NO
 --     event at all within 50 ms, and then closes the speaker to every event
---     until that event is at least 50 ms away;
+--     until that event is at least 50 ms away.  If no speaker is free it
+--     evacuates the cheapest one (see ASSIGNMENT POLICY below); it is the most
+--     constrained item and is never starved by notes that were visited first;
 --   * a `custom` event consumes NOTHING.  It is refused at dispatch, so it must
 --     NEVER trigger a drop; it is passed through (assigned to the first speaker)
 --     so the recorded call order stays a faithful projection of the plan.
@@ -79,10 +81,26 @@
 -- ascending by side, iterating it from index 1 with a strict `<` improvement
 -- test resolves a tie to the earliest speaker in the array.
 --
--- A `play_sound` needs a speaker with NOTHING else within 50 ms of it; if no
--- speaker is free it is dropped.  With several free speakers the first
--- (ascending side) wins -- which least-loaded would also give, since all
--- candidates are at 0.
+-- A `play_sound` needs a speaker with NOTHING else within 50 ms of it.  If one
+-- exists, the first (ascending side) wins.  Otherwise the sound -- the MOST
+-- CONSTRAINED item, because it monopolises a whole speaker-tick -- EVACUATES
+-- the cheapest speaker: that speaker's live notes are relocated (ascending-side
+-- least-loaded, exact 50 ms checks at each note's own time), and a note that
+-- fits nowhere is dropped so the sound can take the span.  The sound always
+-- outranks the notes in its span (nbs/speakers.lua budgets one whole speaker
+-- per sound); this is what stops the visited order from starving it.  With two
+-- vanilla notes and one trumpet in one window and two speakers, the trumpet
+-- takes one speaker and the two notes share the other, instead of the trumpet
+-- dropping because the notes were visited first.
+--
+-- A two-pass "sounds-first" walk was REJECTED: it would change which SIDE a
+-- sound takes whenever a speaker is already free, and the frozen per-side
+-- expectations (a note visited first takes the ascending speaker; the sound
+-- takes the next free one) must not move.  The repair above leaves every
+-- placement that already succeeds untouched.
+--
+-- Custom/unknown events are passed through to the first speaker; they consume
+-- nothing and never trigger a drop.
 --
 -- ===========================================================================
 -- DROP POLICY: DETERMINISTIC, AND IT PRESERVES THE EARLY PART OF THE SONG
@@ -92,8 +110,10 @@
 -- earlier events always claim their slot first, the events that lose are the
 -- LATER ones in that same tuple order.  Concretely: early ticks are retained
 -- over late ticks, then lower layers over higher, then lower note indices over
--- higher.  `dropped_events` lists them in the order they were dropped, which
--- (for a single overflowing window) is that same ascending order.
+-- higher -- the sole exception being a play_sound, which is the most
+-- constrained item and outranks the notes it evacuates; those notes are still
+-- the LATEST among the ones on the evacuated speaker.  `dropped_events` lists
+-- the drops in the frozen order of the plan.
 --
 -- `dropped` counts only events that CONSUME capacity (play_note / play_sound):
 -- a custom event is never "dropped".  Whenever `dropped > 0` OR
@@ -167,62 +187,233 @@ local function allocate(events, speakers)
 
   -- Per-speaker sliding-window bookkeeping, indexed by the speaker's array
   -- position so no hash-table iteration ever touches it.
-  --   times[k]   start times (ms) of the events assigned to speaker k, in
-  --              assignment order (non-decreasing: the frozen plan is ascending)
+  --   times[k]   start times (ms) of speaker k's entries, in assignment order
+  --              (the frozen plan is ascending; a relocation appends the
+  --              relocated note's own -- older or equal -- time, which the
+  --              window scans tolerate because they always re-check the real
+  --              50 ms predicate)
   --   sounds[k]  parallel flag: true when that entry is a play_sound
-  --   head[k]    1-based index of speaker k's first entry that can still share
-  --              a window with the current event; everything before it is at
-  --              least 50 ms behind and can never compete again.
+  --   ids[k]     parallel frozen event index (1-based): decides WHICH note is
+  --              evacuated when a sound needs the speaker -- the later
+  --              (tick_index, layer_index, note_index) loses
+  --   alive[k]   parallel flag: false once an entry was relocated away (it then
+  --              lives on its new speaker only)
+  --   head[k]    1-based index of speaker k's first entry that is not already
+  --              known to be out of reach; everything before it is dead or at
+  --              least 50 ms behind the current event.
   local times = {}
   local sounds = {}
+  local ids = {}
+  local alive = {}
   local head = {}
   for k = 1, total_speakers do
     times[k] = {}
     sounds[k] = {}
+    ids[k] = {}
+    alive[k] = {}
     head[k] = 1
   end
 
-  -- retire(k, t): drop speaker k's entries that are already out of reach at
-  -- time t.  The walk is in non-decreasing t_ms order, so once an entry is
-  -- 50 ms (or more) behind t it is behind every later event too.  The test is
-  -- the boundary of the same strict `< 50` predicate, on actual times.
+  -- owner[i] is set when event i is placed and cleared when an assigned note is
+  -- later evacuated for a play_sound.  It is declared before the helpers below
+  -- because the evacuation closure clears it.
+  local owner = {}
+
+  -- append(k, t, is_sound, id): record one entry on speaker k.
+  local function append(k, t, is_sound, id)
+    local list = times[k]
+    local position = #list + 1
+    list[position] = t
+    sounds[k][position] = is_sound
+    ids[k][position] = id
+    alive[k][position] = true
+  end
+
+  -- retire(k, t): advance speaker k's head past dead entries and past entries
+  -- that are already out of reach at time t (at least 50 ms behind it).  The
+  -- walk is in non-decreasing t_ms order, so an entry 50 ms behind t is behind
+  -- every later event too.  The test is the boundary of the same strict `< 50`
+  -- predicate, on actual times.
   local function retire(k, t)
     local list = times[k]
+    local flags = alive[k]
     local first = head[k]
-    while first <= #list and list[first] <= t
-      and not within_window(list[first], t) do
-      first = first + 1
+    while first <= #list do
+      if not flags[first] then
+        first = first + 1
+      elseif list[first] <= t and not within_window(list[first], t) then
+        first = first + 1
+      else
+        break
+      end
     end
     head[k] = first
   end
 
-  -- live_count(k, t): how many of speaker k's entries share a 50 ms span with
-  -- t.  After retire() the remaining entries are the live ones, so the abs()
-  -- test only re-confirms what retirement already established.
+  -- live_count(k, t): how many of speaker k's LIVE entries share a 50 ms span
+  -- with t.  After retire() the remaining entries are the live ones, so the
+  -- abs() test only re-confirms what retirement already established.
   local function live_count(k, t)
     local list = times[k]
+    local flags = alive[k]
     local count = 0
     for index = head[k], #list do
-      if within_window(list[index], t) then
+      if flags[index] and within_window(list[index], t) then
         count = count + 1
       end
     end
     return count
   end
 
-  -- live_sound(k, t): is one of speaker k's live entries a play_sound?
+  -- live_sound(k, t): is one of speaker k's LIVE entries a play_sound?
   local function live_sound(k, t)
     local list = times[k]
-    local flags = sounds[k]
+    local flags = alive[k]
+    local flags_sound = sounds[k]
     for index = head[k], #list do
-      if flags[index] and within_window(list[index], t) then
+      if flags[index] and flags_sound[index]
+        and within_window(list[index], t) then
         return true
       end
     end
     return false
   end
 
-  local owner = {}
+  -- count_within(k, t) / sound_within(k, t): scan speaker k's WHOLE history.
+  -- A relocation can move a note at an OLDER time onto k, older than entries
+  -- k's head already retired, so a head-relative scan is not enough there; the
+  -- note's own 50 ms window must be checked against every entry k still has.
+  local function count_within(k, t)
+    local list = times[k]
+    local flags = alive[k]
+    local count = 0
+    for index = 1, #list do
+      if flags[index] and within_window(list[index], t) then
+        count = count + 1
+      end
+    end
+    return count
+  end
+
+  local function sound_within(k, t)
+    local list = times[k]
+    local flags = alive[k]
+    local flags_sound = sounds[k]
+    for index = 1, #list do
+      if flags[index] and flags_sound[index]
+        and within_window(list[index], t) then
+        return true
+      end
+    end
+    return false
+  end
+
+  -- live_notes_within(k, t): array indices of speaker k's LIVE play_notes that
+  -- share a 50 ms span with t, ordered by frozen event index.  Used to empty a
+  -- speaker for a play_sound: the earliest notes get first pick of the spare
+  -- capacity, so a note that must be dropped is the LATEST (tick, layer, note)
+  -- among them.  A live play_sound in the span makes the speaker ineligible;
+  -- callers probe live_sound() first.
+  local function live_notes_within(k, t)
+    local list = times[k]
+    local flags = alive[k]
+    local flags_sound = sounds[k]
+    local found = {}
+    for index = head[k], #list do
+      if flags[index] and not flags_sound[index]
+        and within_window(list[index], t) then
+        found[#found + 1] = index
+      end
+    end
+    table.sort(found, function(a, b)
+      return ids[k][a] < ids[k][b]
+    end)
+    return found
+  end
+
+  -- relocation_target(note_time, from): the FIRST speaker (ascending side,
+  -- excluding `from`) that can take one more play_note at note_time -- no
+  -- play_sound within that span and fewer than 8 notes already there.
+  local function relocation_target(note_time, from)
+    for k = 1, total_speakers do
+      if k ~= from then
+        retire(k, note_time)
+        if not sound_within(k, note_time)
+          and count_within(k, note_time) < MAX_NOTES_PER_WINDOW then
+          return k
+        end
+      end
+    end
+    return nil
+  end
+
+  -- move(k, index, k2): relocate speaker k's entry `index` onto speaker k2.
+  -- The owner map is part of the relocation: the emitted call now routes to k2.
+  local function move(k, index, k2)
+    local id = ids[k][index]
+    append(k2, times[k][index], false, id)
+    alive[k][index] = false
+    owner[id] = speakers[k2]
+  end
+
+  -- free_for_sound(t): choose the speaker that gives up its span for a
+  -- play_sound at t, evacuate its live notes, and return its index -- or nil
+  -- when every speaker already holds a live play_sound in the span (then the
+  -- sound has no speaker it could ever use and must drop).
+  --
+  -- CHOOSING THE SPEAKER: the cheapest one -- the speaker whose live notes
+  -- leave the fewest notes with nowhere to go (its load minus the spare note
+  -- slots left on the other speakers).  Ties break to the ascending side, so
+  -- the outcome is deterministic.
+  local function free_for_sound(t)
+    local chosen = nil
+    local chosen_drops = nil
+    for k = 1, total_speakers do
+      retire(k, t)
+      if not live_sound(k, t) then
+        local load = live_count(k, t)
+        if load > 0 then
+          local spare = 0
+          for other = 1, total_speakers do
+            if other ~= k and not live_sound(other, t) then
+              local room = MAX_NOTES_PER_WINDOW - live_count(other, t)
+              if room > 0 then
+                spare = spare + room
+              end
+            end
+          end
+          local drops = load - spare
+          if drops < 0 then
+            drops = 0
+          end
+          if chosen == nil or drops < chosen_drops then
+            chosen = k
+            chosen_drops = drops
+          end
+        end
+      end
+    end
+    if chosen == nil then
+      return nil
+    end
+
+    -- Evacuate: relocate every live note of the span when a target exists;
+    -- evict the ones that fit nowhere.  The sound is the most constrained item
+    -- (one whole speaker-tick), so it takes priority over the notes.
+    local notes = live_notes_within(chosen, t)
+    for index = 1, #notes do
+      local position = notes[index]
+      local note_time = times[chosen][position]
+      local target = relocation_target(note_time, chosen)
+      if target ~= nil then
+        move(chosen, position, target)
+      else
+        alive[chosen][position] = false
+        owner[ids[chosen][position]] = nil
+      end
+    end
+    return chosen
+  end
 
   for i = 1, total_events do
     local event = events[i]
@@ -250,15 +441,15 @@ local function allocate(events, speakers)
         end
       end
       if best ~= nil then
-        local list = times[best]
-        list[#list + 1] = t
-        sounds[best][#sounds[best] + 1] = false
+        append(best, t, false, i)
         owner[i] = speakers[best]
       end
 
     elseif kind == "play_sound" then
-      -- Needs a speaker with NOTHING within 50 ms.  First free speaker
-      -- (ascending side) wins; if none is free the event is dropped.
+      -- An empty speaker wins outright (first free speaker, ascending side),
+      -- which keeps every placement that already worked exactly where it was.
+      -- When none is empty, EVACUATE the cheapest speaker so a valid packing
+      -- is not missed just because the notes were visited first.
       local best = nil
       for k = 1, total_speakers do
         retire(k, t)
@@ -267,10 +458,11 @@ local function allocate(events, speakers)
           break
         end
       end
+      if best == nil then
+        best = free_for_sound(t)
+      end
       if best ~= nil then
-        local list = times[best]
-        list[#list + 1] = t
-        sounds[best][#sounds[best] + 1] = true
+        append(best, t, true, i)
         owner[i] = speakers[best]
       end
 

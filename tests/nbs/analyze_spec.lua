@@ -11,14 +11,22 @@
 --     total_notes              -- integer, #song.notes
 --     ticks_per_second         -- number, header.tempo_ticks_per_second
 --     tick_ms                  -- number, 1000 / ticks_per_second
---     peak_concurrent          -- integer, max simultaneous notes in any 50 ms window
+--     peak_concurrent          -- integer, notes in the REPORTED 50 ms window
 --     peak_window_ms           -- 50 (constant)
---     vanilla_notes_at_peak    -- integer, peak-window notes with instrument id 0..15
---     play_sound_notes_at_peak -- integer, peak-window notes with id 16..19 when v6
+--     vanilla_notes_at_peak    -- integer, reported-window notes that playNote
+--     play_sound_notes_at_peak -- integer, reported-window notes that playSound
+--     custom_notes_at_peak     -- integer, reported-window notes refused at playback
 --     has_extended_range       -- boolean, any key outside 33..57
 --     min_key, max_key         -- integers over all notes (0 and 0 when empty)
 --     loop = { loop, max_loop_count, loop_start_tick }  -- copied from the header
 --   }
+--
+-- The REPORTED window is the one that maximises the count of CAPACITY-CONSUMING
+-- notes (vanilla + play_sound), earliest window on a tie -- customs are refused
+-- at playback and must not hide a genuine vanilla/trumpet burst (F2 cases
+-- 22-26).  peak_concurrent counts every note in that window, so
+-- vanilla_notes_at_peak + play_sound_notes_at_peak + custom_notes_at_peak
+-- always equals peak_concurrent.
 --
 -- THE CLOCK DISTINCTION THIS SPEC PINS DOWN
 -- -----------------------------------------
@@ -320,16 +328,21 @@ describe("nbs.analyze all-custom detection", function()
     io.write("    CASE21 all-custom=" .. tostring(result.all_notes_custom) .. "\n")
   end)
 
-  it("21b. a single playable note ANYWHERE (not just at the peak) makes it false", function()
-    -- The custom note sits at tick 0 (the earliest, and therefore the reported
-    -- peak window); the vanilla note sits later.  The PEAK buckets are 0/0, but
-    -- the song is NOT all-custom, so the flag must still be false.
+  it("21b. a single playable note elsewhere is the reported window and makes all_notes_custom false", function()
+    -- SUPERSEDED BY THE F2 FIX (cases 22-26 below).  This case used to pin the
+    -- OLD window selection: the custom note sat at tick 0, the vanilla note
+    -- later, and the reported window was the earliest (custom) one, buckets
+    -- 0/0.  That selection is exactly the defect F2 removes -- a custom window
+    -- must never outrank a playable one -- so the reported window is now the
+    -- VANILLA note's window and vanilla_notes_at_peak is 1.  The flag this case
+    -- exists for is unchanged and still whole-song derived: NOT all-custom.
     local result = analyze.analyze(song({
       vic = 16,
       notes = { n(0, 16, 45), n(5, 0, 45) },
     }))
 
-    expect.equal(result.vanilla_notes_at_peak, 0)
+    expect.equal(result.vanilla_notes_at_peak, 1)
+    expect.equal(result.custom_notes_at_peak, 0)
     expect.equal(result.all_notes_custom, false)
   end)
 
@@ -617,5 +630,176 @@ describe("nbs.analyze real fixtures", function()
     expect.equal(demo_decoded.ok, true)
     local demo_result = analyze.analyze(demo_decoded.song)
     expect.equal(demo_result.total_notes, 76)
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 22-26. F2: CUSTOM INSTRUMENTS MUST NOT MASK THE PEAK
+--
+-- The reported peak window used to be chosen by the TOTAL note count, so ten
+-- custom notes (which consume NO speaker capacity and are refused at playback)
+-- could win the selection and hide a genuine vanilla/trumpet burst elsewhere --
+-- required_count came back 0 while notes would actually drop.  The window is
+-- now chosen by the count of CAPACITY-CONSUMING notes (vanilla + play_sound):
+--
+--   * `peak_concurrent` keeps its frozen meaning -- the number of notes in the
+--     REPORTED window, customs included -- so the existing custom-peak cases
+--     (7, 7b, 8, 18) stay pinned;
+--   * `custom_notes_at_peak` (new) reports how many of those are custom, so
+--     vanilla_notes_at_peak + play_sound_notes_at_peak + custom_notes_at_peak
+--     == peak_concurrent for the reported window;
+--   * a song with NO capacity-consuming note falls back to the all-notes
+--     maximum burst (nothing can be scheduled; both buckets stay 0).
+-- ---------------------------------------------------------------------------
+
+describe("nbs.analyze capacity-driven peak selection (F2)", function()
+  it("22. REPRO: 10 customs at one instant must not hide 9 vanilla 1000 ms later; required is 2, not 0", function()
+    local notes = {}
+    for _ = 1, 10 do
+      notes[#notes + 1] = n(0, 20, 45)
+    end
+    for _ = 1, 9 do
+      notes[#notes + 1] = n(10, 0, 45)
+    end
+
+    local result = analyze.analyze(song({ tps = 10, vic = 20, notes = notes }))
+
+    expect.near(result.tick_ms, 100)
+    -- The reported window must be the VANILLA one: the customs window holds
+    -- zero capacity-consuming notes and cannot be the budget window.
+    expect.equal(result.vanilla_notes_at_peak, 9)
+    expect.equal(result.play_sound_notes_at_peak, 0)
+    expect.equal(result.custom_notes_at_peak, 0)
+    expect.equal(result.peak_concurrent, 9)
+    expect.equal(speakers.required_count(result), 2)
+
+    io.write(string.format(
+      "    CASE22 F2 repro: peak=%d vanilla=%d playSound=%d custom=%d required=%d\n",
+      result.peak_concurrent, result.vanilla_notes_at_peak,
+      result.play_sound_notes_at_peak, result.custom_notes_at_peak,
+      speakers.required_count(result)))
+  end)
+
+  it("23. a customs-only song: both buckets 0, required 0; the burst is still reported", function()
+    local notes = {}
+    for _ = 1, 5 do
+      notes[#notes + 1] = n(0, 20, 45)
+    end
+
+    local result = analyze.analyze(song({ tps = 10, vic = 20, notes = notes }))
+
+    expect.equal(result.vanilla_notes_at_peak, 0)
+    expect.equal(result.play_sound_notes_at_peak, 0)
+    expect.equal(result.custom_notes_at_peak, 5)
+    expect.equal(result.peak_concurrent, 5)
+    expect.equal(speakers.required_count(result), 0)
+
+    io.write(string.format(
+      "    CASE23 customs-only: peak=%d vanilla=0 playSound=0 required=%d\n",
+      result.peak_concurrent, speakers.required_count(result)))
+  end)
+
+  it("24. customs in the SAME window as vanilla do not inflate the vanilla count", function()
+    local result = analyze.analyze(song({
+      tps = 10,
+      vic = 20,
+      notes = {
+        n(0, 20, 45), n(0, 21, 45), n(0, 22, 45), -- 3 customs
+        n(0, 0, 45), n(0, 1, 45),                 -- 2 vanilla
+      },
+    }))
+
+    expect.equal(result.vanilla_notes_at_peak, 2)
+    expect.equal(result.play_sound_notes_at_peak, 0)
+    expect.equal(result.custom_notes_at_peak, 3)
+    expect.equal(result.peak_concurrent, 5)
+    expect.equal(speakers.required_count(result), 1)
+    -- The vanilla count is exactly the capacity-consuming count of the window.
+    expect.equal(result.vanilla_notes_at_peak + result.play_sound_notes_at_peak,
+      2)
+
+    io.write(string.format(
+      "    CASE24 mixed window: peak=%d vanilla=%d custom=%d required=%d\n",
+      result.peak_concurrent, result.vanilla_notes_at_peak,
+      result.custom_notes_at_peak, speakers.required_count(result)))
+  end)
+
+  it("25. REGRESSION: the vanilla cluster still wins over an equally large custom cluster", function()
+    local notes = {}
+    for _ = 1, 10 do
+      notes[#notes + 1] = n(0, 0, 45)
+    end
+    for _ = 1, 10 do
+      notes[#notes + 1] = n(10, 20, 45)
+    end
+
+    local result = analyze.analyze(song({ tps = 10, vic = 20, notes = notes }))
+
+    -- The two clusters are 1000 ms apart; the earlier VANILLA cluster is the
+    -- reported window because capacity 10 beats the customs' capacity 0.
+    expect.equal(result.peak_concurrent, 10)
+    expect.equal(result.vanilla_notes_at_peak, 10)
+    expect.equal(result.play_sound_notes_at_peak, 0)
+    expect.equal(result.custom_notes_at_peak, 0)
+    expect.equal(speakers.required_count(result), 2)
+
+    io.write(string.format(
+      "    CASE25 two clusters: peak=%d vanilla=%d custom=%d required=%d\n",
+      result.peak_concurrent, result.vanilla_notes_at_peak,
+      result.custom_notes_at_peak, speakers.required_count(result)))
+  end)
+
+  it("26. every fixture: the reported window maximises the capacity-consuming count", function()
+    local names = list_fixtures(FIXTURES_DIR)
+    expect.truthy(#names >= 10)
+
+    local rows = {}
+    for _, name in ipairs(names) do
+      local bytes = read_file(join(FIXTURES_DIR, name))
+      expect.truthy(bytes ~= nil)
+      local decoded = decode.decode(bytes)
+      expect.equal(decoded.ok, true)
+      local subject = decoded.song
+      local analysed = analyze.analyze(subject)
+
+      -- Brute force over EVERY note anchor: the maximum number of
+      -- capacity-consuming notes that share a 50 ms span anywhere in the song.
+      local times = {}
+      for index = 1, #subject.notes do
+        local note = subject.notes[index]
+        local bucket = instrument_table.bucket_of(note.instrument,
+          subject.header.vanilla_instrument_count)
+        if bucket == "vanilla" or bucket == "play_sound" then
+          times[#times + 1] = note.tick * analysed.tick_ms
+        end
+      end
+      local best = 0
+      for left = 1, #times do
+        local count = 0
+        for right = 1, #times do
+          if math.abs(times[right] - times[left]) < 50 then
+            count = count + 1
+          end
+        end
+        if count > best then
+          best = count
+        end
+      end
+
+      expect.equal(analysed.vanilla_notes_at_peak
+        + analysed.play_sound_notes_at_peak, best)
+      -- The reported window's kinds partition peak_concurrent.
+      expect.equal(analysed.vanilla_notes_at_peak
+        + analysed.play_sound_notes_at_peak + analysed.custom_notes_at_peak,
+        analysed.peak_concurrent)
+
+      rows[#rows + 1] = string.format(
+        "    FIXTURE %-28s peak=%-3d vanilla=%-3d playSound=%-3d custom=%-3d capacityMax=%d",
+        name, analysed.peak_concurrent, analysed.vanilla_notes_at_peak,
+        analysed.play_sound_notes_at_peak, analysed.custom_notes_at_peak, best)
+    end
+    for _, row in ipairs(rows) do
+      io.write(row .. "\n")
+    end
   end)
 end)

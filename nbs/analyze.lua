@@ -11,16 +11,33 @@
 --     total_notes              integer  #song.notes
 --     ticks_per_second         number   header.tempo_ticks_per_second
 --     tick_ms                  number   1000 / ticks_per_second
---     peak_concurrent          integer  max simultaneous notes in any 50 ms window
+--     peak_concurrent          integer  number of notes in the reported window
 --     peak_window_ms           integer  50 (constant)
---     vanilla_notes_at_peak    integer  peak-window notes classified "vanilla"
---     play_sound_notes_at_peak integer  peak-window notes classified "play_sound"
+--     vanilla_notes_at_peak    integer  reported-window notes classified "vanilla"
+--     play_sound_notes_at_peak integer  reported-window notes classified "play_sound"
+--     custom_notes_at_peak     integer  reported-window notes classified "custom"
 --     has_extended_range       boolean  true when ANY key is outside 33..57
 --     min_key, max_key         integer  over all notes (0 and 0 when there are none)
 --     all_notes_custom         boolean  true when the song has notes but NONE of
 --                                        them classify as vanilla/play_sound --
 --                                        i.e. every note is refused at playback
 --     loop = { loop, max_loop_count, loop_start_tick }  copied from the header
+--
+--   THE REPORTED WINDOW is the 50 ms window that maximises the number of
+--   CAPACITY-CONSUMING notes (vanilla + play_sound); ties go to the EARLIEST
+--   window.  Custom notes are refused at playback, so they do NOT steer the
+--   selection -- a crowd of them must never hide a real vanilla/trumpet burst
+--   elsewhere and understate the requirement.  `custom_notes_at_peak` exposes
+--   the refused notes that happen to share the reported window, so
+--     vanilla_notes_at_peak + play_sound_notes_at_peak + custom_notes_at_peak
+--       == peak_concurrent
+--   and vanilla_notes_at_peak + play_sound_notes_at_peak is the maximum
+--   capacity-consuming count over every 50 ms window in the song.
+--
+--   A song with NO capacity-consuming note has no requirement to maximise, so
+--   the reported window falls back to the all-notes maximum burst; both buckets
+--   and the requirement stay 0 while peak_concurrent still describes the
+--   song's density.
 --
 -- This module is a PURE function: it reads no clock, touches no peripheral, does
 -- no file I/O and relies on no global mutable state, so calling it twice on the
@@ -46,16 +63,29 @@
 -- never on tick distance.
 --
 -- PEAK ALGORITHM
---   1. Map each note to a start time in ms: t = note.tick * tick_ms.
+--   1. Map each note to a start time in ms: t = note.tick * tick_ms, and
+--      classify it ONCE with instrument_table.bucket_of.
 --   2. Sort those times ascending.
 --   3. Two-pointer sliding window: for each left index i, advance a right index
 --      j while times[j] - times[i] < 50 (STRICT `<`, so a gap of exactly 50 ms
---      starts a new window).  The window holds j - i notes.
---   4. peak_concurrent is the maximum count over every left index; anchoring the
---      left edge on a note is complete (the maximum over all 50 ms windows is
---      always attained by a window whose left edge sits on some note).
+--      starts a new window).
+--   4. The REPORTED window is the one maximising the count of capacity-
+--      CONSUMING notes (vanilla + play_sound) inside it -- NOT the total count.
+--      Custom notes consume nothing and are refused at playback, so letting
+--      them win the selection is exactly the bug that reported required == 0
+--      while a vanilla burst elsewhere would drop.  A prefix sum of the
+--      capacity flags makes each window's capacity count O(1).  Anchoring the
+--      left edge on a note is complete: the maximum over all 50 ms windows is
+--      attained by a window whose left edge sits on some note, and sliding an
+--      optimal window's left edge right to its first capacity-consuming note
+--      keeps every such note inside.
+--   5. peak_concurrent is the number of ALL notes in the reported window
+--      (customs included) -- that is the field's frozen meaning.  When the song
+--      has no capacity-consuming note at all, step 4 has no maximum to find,
+--      so the fallback is the all-notes maximum burst; the buckets and the
+--      requirement stay 0.
 --
--- INSTRUMENT BUCKETS (only the chosen peak window is classified)
+-- INSTRUMENT BUCKETS (only the reported window is classified)
 --   The classification rule has ONE owner: nbs/instrument_table.bucket_of --
 --   the same classifier player/plan.lua reaches through resolve().  A
 --   re-implementation here (hardcoded 0..15 / 16..19 constants) previously
@@ -66,15 +96,15 @@
 --     vanilla     below the file's vanilla boundary, id 0..15
 --     play_sound  16..19 below that boundary (the v6 "trumpet" native sounds)
 --     custom      anything else -- refused at playback, so it counts toward
---                 NEITHER bucket.  It still counts in peak_concurrent because
---                 it is a simultaneous note; it just must not inflate the
---                 speaker requirement for the buckets the player can schedule.
+--                 NEITHER bucket AND does not steer the peak selection; it is
+--                 reported separately as custom_notes_at_peak when it shares
+--                 the window the requirement was computed from.
 --
 -- TIE-BREAK (deterministic)
---   When several distinct windows attain the same maximum, the reported bucket
---   split is taken from the EARLIEST window in time (the smallest left index).
---   The two-pointer loop only replaces the recorded peak on a STRICT increase,
---   so the first window to reach the maximum wins.
+--   When several distinct windows attain the same maximum CAPACITY count, the
+--   reported split is taken from the EARLIEST window in time (the smallest left
+--   index).  The selection loop only replaces the recorded peak on a STRICT
+--   increase, so the first window to reach the maximum wins.
 --
 -- Lua 5.2 / Cobalt constraints honoured: no `//`, no bitwise operators, no
 -- utf8.*, no math.maxinteger, no collectgarbage, no string.dump, no os.exit.
@@ -102,8 +132,11 @@ function analyze.analyze(song)
   local ticks_per_second = header.tempo_ticks_per_second
   local tick_ms = 1000 / ticks_per_second
 
-  -- Key range + extended-range scan + playable-note count, over ALL notes
-  -- (independent of the 50 ms window).
+  -- Key range + extended-range scan (over ALL notes, independent of the 50 ms
+  -- window) plus ONE classification pass: each note's bucket is decided here by
+  -- the single owner of the rule (instrument_table.bucket_of), and the SAME
+  -- decision is kept for the window pass below -- so the window selection and
+  -- the reported split can never disagree.
   local min_key = 0
   local max_key = 0
   local has_extended_range = false
@@ -111,6 +144,10 @@ function analyze.analyze(song)
   -- A note that is neither is a custom instrument, refused at playback; when
   -- this stays 0 on a non-empty song the whole song is silent.
   local playable_notes = 0
+  -- How many notes CONSUME speaker capacity (vanilla + play_sound).  Customs do
+  -- not, so they must not influence which window is reported.
+  local capacity_notes = 0
+  local items = {}
   for index = 1, total_notes do
     local note = notes[index]
     local key = note.key
@@ -130,19 +167,15 @@ function analyze.analyze(song)
     end
     local bucket = instrument_table.bucket_of(note.instrument,
       header.vanilla_instrument_count)
-    if bucket == "vanilla" or bucket == "play_sound" then
+    local consumes = bucket == "vanilla" or bucket == "play_sound"
+    if consumes then
       playable_notes = playable_notes + 1
+      capacity_notes = capacity_notes + 1
     end
-  end
-
-  -- Project every note to its start time in milliseconds, keeping the
-  -- instrument alongside (needed to classify the chosen peak window).
-  local items = {}
-  for index = 1, total_notes do
-    local note = notes[index]
     items[index] = {
       t = note.tick * tick_ms,
-      instrument = note.instrument,
+      bucket = bucket,
+      consumes = consumes,
     }
   end
 
@@ -153,38 +186,82 @@ function analyze.analyze(song)
   -- Two-pointer sliding window over the sorted times.  `j` is monotonic: as the
   -- left edge moves right the window can only extend, never retract, so a single
   -- forward pass is exact.
-  local peak = 0
+  --
+  -- WHAT THE WINDOW MAXIMISES: when the song has any capacity-consuming note,
+  -- the reported window is the one holding the most of them (customs count for
+  -- nothing and must never win the selection); ties keep the EARLIEST window.
+  -- peak_span is the number of ALL notes in that window -- what peak_concurrent
+  -- has always meant.
+  local peak_capacity = 0
   local peak_left = nil
-  local j = 1
-  for i = 1, total_notes do
-    if j < i then
-      j = i
+  local peak_span = 0
+  if capacity_notes > 0 then
+    -- Prefix count of the capacity-consuming notes, so each window's capacity
+    -- count is O(1) while the two pointers slide.
+    local prefix = {}
+    prefix[0] = 0
+    for index = 1, total_notes do
+      local step = 0
+      if items[index].consumes then
+        step = 1
+      end
+      prefix[index] = prefix[index - 1] + step
     end
-    while j <= total_notes and items[j].t - items[i].t < PEAK_WINDOW_MS do
-      j = j + 1
+
+    local j = 1
+    for i = 1, total_notes do
+      if j < i then
+        j = i
+      end
+      while j <= total_notes and items[j].t - items[i].t < PEAK_WINDOW_MS do
+        j = j + 1
+      end
+      local capacity_count = prefix[j - 1] - prefix[i - 1]
+      if capacity_count > peak_capacity then
+        peak_capacity = capacity_count
+        peak_left = i
+        peak_span = j - i
+      end
     end
-    local count = j - i
-    if count > peak then
-      peak = count
-      peak_left = i
+  else
+    -- No capacity-consuming note anywhere: nothing can be scheduled, so there
+    -- is no requirement to maximise.  Fall back to the all-notes maximum burst
+    -- so peak_concurrent still reports the song's density; both buckets and the
+    -- requirement stay 0.
+    local j = 1
+    for i = 1, total_notes do
+      if j < i then
+        j = i
+      end
+      while j <= total_notes and items[j].t - items[i].t < PEAK_WINDOW_MS do
+        j = j + 1
+      end
+      local count = j - i
+      if count > peak_span then
+        peak_span = count
+        peak_left = i
+      end
     end
   end
 
-  -- Classify only the chosen peak window.  A strict `>` above means the earliest
-  -- window that attains the maximum is the one recorded.
+  -- Classify the reported window.  A strict `>` in the selection loops means the
+  -- earliest window that attains the maximum is the one recorded.
   local vanilla_at_peak = 0
   local play_sound_at_peak = 0
-  if peak_left ~= nil and peak > 0 then
-    for index = peak_left, peak_left + peak - 1 do
-      -- ONE classifier: the very same function player/plan.lua reaches through
-      -- instrument_table.resolve, so the analyzer and the allocator can never
-      -- disagree about which notes need a playNote and which need a playSound.
-      local bucket = instrument_table.bucket_of(items[index].instrument,
-        header.vanilla_instrument_count)
+  local custom_at_peak = 0
+  if peak_left ~= nil and peak_span > 0 then
+    for index = peak_left, peak_left + peak_span - 1 do
+      -- ONE classifier already ran above: the very same function player/plan.lua
+      -- reaches through instrument_table.resolve, so the analyzer and the
+      -- allocator can never disagree about which notes need a playNote and
+      -- which need a playSound.
+      local bucket = items[index].bucket
       if bucket == "vanilla" then
         vanilla_at_peak = vanilla_at_peak + 1
       elseif bucket == "play_sound" then
         play_sound_at_peak = play_sound_at_peak + 1
+      else
+        custom_at_peak = custom_at_peak + 1
       end
     end
   end
@@ -193,17 +270,25 @@ function analyze.analyze(song)
     total_notes = total_notes,
     ticks_per_second = ticks_per_second,
     tick_ms = tick_ms,
-    peak_concurrent = peak,
+    -- The number of notes in the REPORTED window, customs included.  The
+    -- window itself is chosen by the capacity-consuming count, so
+    -- vanilla + play_sound + custom == peak_concurrent and vanilla +
+    -- play_sound is the maximum capacity-consuming count over every 50 ms
+    -- window of the song.
+    peak_concurrent = peak_span,
     peak_window_ms = PEAK_WINDOW_MS,
     vanilla_notes_at_peak = vanilla_at_peak,
     play_sound_notes_at_peak = play_sound_at_peak,
+    -- How many of the reported window's notes are custom (refused at playback):
+    -- they are excluded from the selection and from the speaker requirement.
+    custom_notes_at_peak = custom_at_peak,
     has_extended_range = has_extended_range,
     min_key = min_key,
     max_key = max_key,
     -- True for a non-empty song in which EVERY note is refused at playback
     -- (custom instrument ids).  A plain boolean, derived from the whole song --
-    -- NOT from the peak window, whose buckets can be 0/0 for a song that still
-    -- has playable notes elsewhere.
+    -- NOT from the reported window, whose buckets can be 0/0 for a song that
+    -- still has playable notes elsewhere.
     all_notes_custom = total_notes > 0 and playable_notes == 0,
     loop = {
       loop = header.loop,

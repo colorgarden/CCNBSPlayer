@@ -31,8 +31,13 @@
 -- ASSIGNMENT POLICY: stable greedy least-loaded.  Walk events in their frozen
 -- (tick, layer, note) order; pick the speaker with the FEWEST notes already
 -- assigned in that event's window; ties break to the ASCENDING side (the
--- earliest speaker in the already-side-sorted array).  A play_sound needs a
--- speaker with NOTHING else in the window; if none is empty it is dropped.
+-- earliest speaker in the already-side-sorted array).  A play_sound prefers a
+-- speaker with NOTHING else in the window; when no speaker is empty it is the
+-- MOST constrained item (it needs a whole speaker-tick), so it EVACUATES the
+-- speaker that costs the fewest dropped notes: that speaker's live notes are
+-- relocated to other speakers, and only notes that fit nowhere are dropped.
+-- Sounds therefore win the last speaker against notes, and a later sound can
+-- never be starved by earlier notes when a valid packing exists (F1 case 22).
 --
 -- DROP POLICY: deterministic and preserves the early song.  An event that
 -- cannot be placed is dropped; because the walk is in frozen order, the losers
@@ -861,5 +866,431 @@ describe("fanout assign: sliding 50 ms window (B1)", function()
     end
     -- Prove the play_sound half of the walk was not vacuous.
     expect.truthy(sounds_assigned >= 1)
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 22-27. F1: A LATER play_sound MAY NOT BE STARVED BY EARLIER play_notes
+--
+-- The allocator used to place every event in frozen order with no way back, so
+-- a play_sound that arrived after notes had claimed every speaker found no
+-- EMPTY speaker and was dropped -- even when a valid packing existed (the sound
+-- takes one whole speaker, the notes share another).  The fix keeps the frozen
+-- walk and the stable least-loaded policy for notes; a starved play_sound now
+-- EVACUATES the cheapest speaker: its live notes are relocated to other
+-- speakers (ascending-side, capacity-checked) and only notes that fit nowhere
+-- are dropped.  Sounds are the most constrained items -- one whole
+-- speaker-tick each -- so a sound wins the last speaker against notes.
+--
+-- The emitted call order is UNTOUCHED: `play()` still walks the events in
+-- frozen (tick, layer, note) order (case 22 re-checks it).
+-- ---------------------------------------------------------------------------
+
+-- consume_within(list, position): how many CAPACITY-CONSUMING events (notes and
+-- sounds) of one speaker list share a 50 ms span with list[position].  Custom
+-- events consume nothing, so they are ignored here -- unlike the older
+-- assert_window_invariant helper, which assumes a list with no customs at all.
+local function consume_within(list, position)
+  local pivot = list[position].t_ms
+  if type(pivot) ~= "number" then
+    pivot = 0
+  end
+  local count = 0
+  for other = 1, #list do
+    local kind = list[other].kind
+    if kind == "play_note" or kind == "play_sound" then
+      local t_ms = list[other].t_ms
+      if type(t_ms) ~= "number" then
+        t_ms = 0
+      end
+      if math.abs(t_ms - pivot) < 50 then
+        count = count + 1
+      end
+    end
+  end
+  return count
+end
+
+-- assert_capacity_invariant(assignment, speakers): the frozen capacity rule,
+-- read back from the assignment itself: on every speaker, no play_note shares a
+-- span with more than 8 consuming events, and a play_sound shares its span with
+-- NOTHING (its own span holds exactly one consuming event).
+local function assert_capacity_invariant(assignment, speakers)
+  for index = 1, #speakers do
+    local list = assignment.by_speaker[speakers[index].side] or {}
+    for position = 1, #list do
+      local kind = list[position].kind
+      if kind == "play_note" then
+        expect.truthy(consume_within(list, position) <= 8)
+      elseif kind == "play_sound" then
+        expect.equal(consume_within(list, position), 1)
+      end
+    end
+  end
+end
+
+describe("fanout assign: a starved play_sound evacuates notes (F1)", function()
+  it("22. REPRO: 2 vanilla + 1 trumpet in one window, 2 speakers -> dropped=0; the trumpet holds one speaker alone", function()
+    local speakers = two_speakers()
+    local events = {
+      event({ t_ms = 0, tick_index = 0, layer_index = 0, note_index = 1,
+        name = "v1" }),
+      event({ t_ms = 0, tick_index = 0, layer_index = 1, note_index = 1,
+        name = "v2" }),
+      event({ kind = "play_sound", name = "trumpet", key = 45,
+        t_ms = 0, tick_index = 0, layer_index = 2, note_index = 1 }),
+    }
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 2, play_sound_notes_at_peak = 1,
+        peak_concurrent = 3 }), speakers)
+
+    expect.equal(result.dropped, 0)
+    expect.equal(result.warning_code, nil)
+    expect.equal(#result.dropped_events, 0)
+
+    -- One side is the trumpet ALONE; the other side carries BOTH vanilla notes.
+    -- Assert the per-speaker contents, not just the counts.
+    local sound_side = nil
+    local note_side = nil
+    for _, side in ipairs({ "left", "right" }) do
+      local list = result.by_speaker[side]
+      if #list == 1 and list[1].kind == "play_sound" then
+        sound_side = side
+      elseif #list == 2 and list[1].kind == "play_note"
+        and list[2].kind == "play_note" then
+        note_side = side
+      end
+    end
+    expect.truthy(sound_side ~= nil)
+    expect.truthy(note_side ~= nil)
+    expect.truthy(sound_side ~= note_side)
+    expect.equal(result.by_speaker[note_side][1].name, "v1")
+    expect.equal(result.by_speaker[note_side][2].name, "v2")
+
+    -- The emitted calls keep the frozen order: v1, v2 on the note side, then
+    -- the trumpet on its own side.
+    local recorder, log = recording_dispatch()
+    fanout.play(events, analysis({ vanilla_notes_at_peak = 2,
+      play_sound_notes_at_peak = 1, peak_concurrent = 3 }), speakers, recorder)
+    expect.equal(#log, 3)
+    expect.equal(log[1].side, note_side)
+    expect.equal(log[1].layer_index, 0)
+    expect.equal(log[2].side, note_side)
+    expect.equal(log[2].layer_index, 1)
+    expect.equal(log[3].side, sound_side)
+    expect.equal(log[3].layer_index, 2)
+
+    io.write(string.format(
+      "    CASE-22 F1 repro: left=%d right=%d dropped=%d sound_side=%s\n",
+      count_of(result, "left"), count_of(result, "right"), result.dropped,
+      tostring(sound_side)))
+  end)
+
+  it("23. 3 vanilla + 1 trumpet, 2 speakers -> dropped=0; the trumpet holds one speaker alone", function()
+    local speakers = two_speakers()
+    local events = burst(3, 0)
+    events[#events + 1] = event({ kind = "play_sound", name = "trumpet",
+      key = 45, t_ms = 0, tick_index = 0, layer_index = 3, note_index = 1 })
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 3, play_sound_notes_at_peak = 1,
+        peak_concurrent = 4 }), speakers)
+
+    expect.equal(result.dropped, 0)
+    local sound_side = nil
+    local note_side = nil
+    for _, side in ipairs({ "left", "right" }) do
+      local list = result.by_speaker[side]
+      if #list == 1 and list[1].kind == "play_sound" then
+        sound_side = side
+      elseif #list == 3 then
+        note_side = side
+        for position = 1, #list do
+          expect.equal(list[position].kind, "play_note")
+        end
+      end
+    end
+    expect.truthy(sound_side ~= nil)
+    expect.truthy(note_side ~= nil)
+    expect.truthy(sound_side ~= note_side)
+    assert_capacity_invariant(result, speakers)
+
+    io.write(string.format(
+      "    CASE-23 3 vanilla + 1 trumpet: left=%d right=%d dropped=%d\n",
+      count_of(result, "left"), count_of(result, "right"), result.dropped))
+  end)
+
+  it("24. 9 vanilla + 1 trumpet, 2 speakers -> the LATEST vanilla drops; the trumpet survives", function()
+    local speakers = two_speakers()
+    local events = burst(9, 0)
+    events[#events + 1] = event({ kind = "play_sound", name = "trumpet",
+      key = 45, t_ms = 0, tick_index = 0, layer_index = 9, note_index = 1 })
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 9, play_sound_notes_at_peak = 1,
+        peak_concurrent = 10 }), speakers)
+
+    -- One speaker-tick must go to the trumpet, leaving 8 note slots: exactly
+    -- one vanilla note has nowhere to go.  It is the LAST in frozen order, and
+    -- the sound survives (it is the most constrained item).
+    expect.equal(result.dropped, 1)
+    expect.equal(#result.dropped_events, 1)
+    expect.equal(result.dropped_events[1].kind, "play_note")
+    expect.equal(result.dropped_events[1].note_index, 9)
+    expect.equal(result.warning_code, "speakers")
+    expect.equal(result.warning_args.required, 3)
+
+    local sound_placed = 0
+    local notes_placed = 0
+    for _, side in ipairs({ "left", "right" }) do
+      local list = result.by_speaker[side]
+      for position = 1, #list do
+        if list[position].kind == "play_sound" then
+          sound_placed = sound_placed + 1
+          expect.equal(#list, 1) -- the sound shares its speaker with nothing
+        else
+          notes_placed = notes_placed + 1
+        end
+      end
+    end
+    expect.equal(sound_placed, 1)
+    expect.equal(notes_placed, 8)
+    assert_capacity_invariant(result, speakers)
+
+    io.write(string.format(
+      "    CASE-24 9 vanilla + 1 trumpet: left=%d right=%d dropped=%d loser=%d sound_placed=%d\n",
+      count_of(result, "left"), count_of(result, "right"), result.dropped,
+      result.dropped_events[1].note_index, sound_placed))
+  end)
+
+  it("25. 2 trumpets + 2 vanilla, 2 speakers -> each speaker takes one trumpet; both vanilla drop", function()
+    local speakers = two_speakers()
+    local events = {
+      event({ kind = "play_sound", name = "trumpet", key = 45,
+        t_ms = 0, tick_index = 0, layer_index = 0, note_index = 1 }),
+      event({ t_ms = 0, tick_index = 0, layer_index = 1, note_index = 1,
+        name = "v1" }),
+      event({ kind = "play_sound", name = "trumpet", key = 45,
+        t_ms = 0, tick_index = 0, layer_index = 2, note_index = 1 }),
+      event({ t_ms = 0, tick_index = 0, layer_index = 3, note_index = 1,
+        name = "v2" }),
+    }
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 2, play_sound_notes_at_peak = 2,
+        peak_concurrent = 4 }), speakers)
+
+    -- Two sounds in one span need BOTH speakers, each alone: no speaker can
+    -- carry a note, so the two vanilla notes (which can share nothing with a
+    -- sound) both drop.  Placed == 2 (the sounds), dropped == 2.
+    expect.equal(result.dropped, 2)
+    expect.equal(#result.dropped_events, 2)
+    expect.equal(result.dropped_events[1].kind, "play_note")
+    expect.equal(result.dropped_events[2].kind, "play_note")
+    for _, side in ipairs({ "left", "right" }) do
+      local list = result.by_speaker[side]
+      expect.equal(#list, 1)
+      expect.equal(list[1].kind, "play_sound")
+    end
+    assert_capacity_invariant(result, speakers)
+
+    io.write(string.format(
+      "    CASE-25 2 trumpets + 2 vanilla: left=%d right=%d dropped=%d\n",
+      count_of(result, "left"), count_of(result, "right"), result.dropped))
+  end)
+
+  it("25b. 2 trumpets + 1 vanilla, 2 speakers -> one trumpet per speaker, the vanilla drops", function()
+    local speakers = two_speakers()
+    local events = {
+      event({ kind = "play_sound", name = "trumpet", key = 45,
+        t_ms = 0, tick_index = 0, layer_index = 0, note_index = 1 }),
+      event({ t_ms = 0, tick_index = 0, layer_index = 1, note_index = 1,
+        name = "v1" }),
+      event({ kind = "play_sound", name = "trumpet", key = 45,
+        t_ms = 0, tick_index = 0, layer_index = 2, note_index = 1 }),
+    }
+
+    local result = fanout.assign(events,
+      analysis({ vanilla_notes_at_peak = 1, play_sound_notes_at_peak = 2,
+        peak_concurrent = 3 }), speakers)
+
+    expect.equal(result.dropped, 1)
+    expect.equal(result.dropped_events[1].kind, "play_note")
+    expect.equal(result.dropped_events[1].name, "v1")
+    for _, side in ipairs({ "left", "right" }) do
+      local list = result.by_speaker[side]
+      expect.equal(#list, 1)
+      expect.equal(list[1].kind, "play_sound")
+    end
+    assert_capacity_invariant(result, speakers)
+
+    io.write(string.format(
+      "    CASE-25b 2 trumpets + 1 vanilla: left=%d right=%d dropped=%d\n",
+      count_of(result, "left"), count_of(result, "right"), result.dropped))
+  end)
+
+  it("26. PACKING OPTIMALITY: a random one-span window never drops when a packing exists (brute force)", function()
+    -- Deterministic Lehmer LCG, Cobalt-safe: every intermediate product stays
+    -- below 2^53, so stock Lua 5.2 doubles compute it EXACTLY (a 2^31-modulus
+    -- LCG would lose its low bits to rounding and degenerate).
+    local state = 20260925
+    local function next_rand(limit)
+      state = (state * 16807) % 2147483647
+      return state % limit
+    end
+
+    -- can_pack(vanilla, sounds, speaker_count): EXHAUSTIVE existence proof for
+    -- events that all share ONE 50 ms span.  Each play_sound needs its own
+    -- speaker and excludes everything else in the span, so enumerate every
+    -- injective sound-to-speaker assignment; the remaining speakers hold at
+    -- most 8 play_notes each, and notes are interchangeable for FEASIBILITY,
+    -- so the fit test is a capacity sum.
+    local function can_pack(vanilla_count, sound_count, speaker_count)
+      local function place(sound_index, used)
+        if sound_index > sound_count then
+          local free = 0
+          for k = 1, speaker_count do
+            if not used[k] then
+              free = free + 1
+            end
+          end
+          return vanilla_count <= free * 8
+        end
+        for k = 1, speaker_count do
+          if not used[k] then
+            used[k] = true
+            local packed = place(sound_index + 1, used)
+            used[k] = nil
+            if packed then
+              return true
+            end
+          end
+        end
+        return false
+      end
+      if sound_count > speaker_count then
+        return false
+      end
+      return place(1, {})
+    end
+
+    local trials = 400
+    local feasible_seen = 0
+    for trial = 1, trials do
+      local vanilla_count = next_rand(13)     -- 0..12
+      local sound_count = next_rand(4)        -- 0..3
+      local speaker_count = 1 + next_rand(4)  -- 1..4
+
+      local events = {}
+      local layer = 0
+      for _ = 1, vanilla_count do
+        events[#events + 1] = event({ t_ms = next_rand(50), tick_index = 0,
+          layer_index = layer, note_index = 1, name = "v" .. tostring(layer) })
+        layer = layer + 1
+      end
+      for _ = 1, sound_count do
+        events[#events + 1] = event({ kind = "play_sound", name = "trumpet",
+          key = 45, t_ms = next_rand(50), tick_index = 0, layer_index = layer,
+          note_index = 1 })
+        layer = layer + 1
+      end
+
+      local speakers = {}
+      for index = 1, speaker_count do
+        speakers[index] = speaker.mock("s" .. tostring(index))
+      end
+
+      local result = fanout.assign(events, analysis({
+        vanilla_notes_at_peak = vanilla_count,
+        play_sound_notes_at_peak = sound_count,
+        peak_concurrent = vanilla_count + sound_count,
+      }), speakers)
+
+      assert_capacity_invariant(result, speakers)
+
+      if can_pack(vanilla_count, sound_count, speaker_count) then
+        feasible_seen = feasible_seen + 1
+        if result.dropped ~= 0 then
+          error(string.format(
+            "F1 packing miss at trial %d: vanilla=%d sounds=%d speakers=%d dropped=%d",
+            trial, vanilla_count, sound_count, speaker_count, result.dropped), 2)
+        end
+      end
+    end
+
+    -- Prove the feasibility branch was exercised, not vacuous.
+    expect.truthy(feasible_seen >= 50)
+    io.write(string.format(
+      "    CASE-26 packing optimality: %d trials, %d feasible-by-brute-force, all dropped=0\n",
+      trials, feasible_seen))
+  end)
+
+  it("27. FUZZ: 2000 random plans keep the capacity invariant on every assignment", function()
+    local state = 424242
+    local function next_rand(limit)
+      state = (state * 16807) % 2147483647
+      return state % limit
+    end
+
+    local trials = 2000
+    local consuming_total = 0
+    for trial = 1, trials do
+      local speaker_count = 1 + next_rand(4)  -- 1..4
+      local event_count = next_rand(24)       -- 0..23
+      local events = {}
+      local t_ms = 0
+      for index = 1, event_count do
+        t_ms = t_ms + next_rand(81) -- non-decreasing: a real plan's t_ms order
+        local roll = next_rand(10)
+        local kind = "play_note"
+        if roll >= 9 then
+          kind = "play_sound"
+        elseif roll >= 8 then
+          kind = "custom"
+        end
+        events[index] = event({ kind = kind, t_ms = t_ms,
+          tick_index = math.floor(t_ms / 50), layer_index = index - 1,
+          note_index = 1, name = kind })
+        if kind ~= "custom" then
+          consuming_total = consuming_total + 1
+        end
+      end
+
+      local speakers = {}
+      for index = 1, speaker_count do
+        speakers[index] = speaker.mock("s" .. tostring(index))
+      end
+
+      local result = fanout.assign(events, analysis(), speakers)
+      assert_capacity_invariant(result, speakers)
+
+      -- Accounting: every capacity-consuming event is either placed on a
+      -- speaker or listed in dropped_events -- never both, never neither.
+      local placed = 0
+      for index = 1, #speakers do
+        local list = result.by_speaker[speakers[index].side] or {}
+        for position = 1, #list do
+          local kind = list[position].kind
+          if kind == "play_note" or kind == "play_sound" then
+            placed = placed + 1
+          end
+        end
+      end
+      local consuming_here = 0
+      for index = 1, event_count do
+        local kind = events[index].kind
+        if kind == "play_note" or kind == "play_sound" then
+          consuming_here = consuming_here + 1
+        end
+      end
+      expect.equal(placed + result.dropped, consuming_here)
+      expect.equal(#result.dropped_events, result.dropped)
+    end
+    expect.truthy(consuming_total >= 20000)
+
+    io.write(string.format(
+      "    CASE-27 fuzz: %d trials, %d capacity-consuming events, invariant held\n",
+      trials, consuming_total))
   end)
 end)
