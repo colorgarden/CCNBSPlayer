@@ -93,6 +93,16 @@
 --   * A version byte greater than 6 raises a TYPED ERROR TABLE
 --     { code = "E_UNSUPPORTED_VERSION", msg = <string>, version = <n> } via
 --     error(tbl, 0), and parsing stops immediately.
+--   * A NEGATIVE layer_count raises a TYPED ERROR TABLE
+--     { code = "E_BAD_LAYER_COUNT", msg = <string>, layer_count = <n>,
+--       version = <n> } via error(tbl, 0), and parsing stops immediately.
+--     layer_count is spec-faithfully a signed i16, so a raw count >= 32768
+--     wraps negative; such a count is impossible for a real file and is
+--     rejected here rather than accepted (a negative count would make
+--     layers.parse's `layer_count > remaining` guard false, run zero
+--     iterations, and let the corrupt file decode as a success).  The code is
+--     the SAME one layers.parse already raises for an unsustainable count, so
+--     callers branch on a single consistent `.code`.
 --
 -- Lua 5.2 / Cobalt constraints honoured here: no `//`, no bitwise operators, no
 -- math.maxinteger, no collectgarbage, no string.dump, no os.exit, no utf8.*.
@@ -165,6 +175,25 @@ function header.parse(r)
 
   -- Fields shared by both layouts, in identical order ------------------------
   local layer_count = r:i16()
+
+  -- A negative layer_count is corrupt.  The field is spec-faithfully a SIGNED
+  -- i16, so a raw count >= 32768 wraps negative (e.g. 60000 -> -5536,
+  -- 65535 -> -1).  Reject it HERE at the point of read: layers.parse's
+  -- byte-budget guard is `layer_count > remaining`, which is FALSE for any
+  -- negative number, so a negative count would run ZERO iterations and the
+  -- whole corrupt file would decode as a success.  Reuse layers.parse's own
+  -- typed code so callers see one consistent `.code`.
+  if layer_count < 0 then
+    error({
+      code = "E_BAD_LAYER_COUNT",
+      msg = string.format(
+        "negative layer_count %d (raw signed i16; corrupt header)",
+        layer_count),
+      layer_count = layer_count,
+      version = version,
+    }, 0)
+  end
+
   local name = r:read_string()
   local author = r:read_string()
   local original_author = r:read_string()

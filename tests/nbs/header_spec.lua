@@ -405,3 +405,54 @@ describe("nbs.header legacy v0 end-to-end", function()
     expect.equal(h.loop_start_tick, nil)
   end)
 end)
+
+describe("nbs.header layer_count signed-wrap guard", function()
+  -- REGRESSION (silent-success defect).  layer_count is SPEC-FAITHFULLY a
+  -- signed i16, so a raw count >= 32768 wraps negative.  Before the fix the
+  -- negative count was accepted here and then flowed into layers.parse, whose
+  -- `layer_count > remaining` guard is false for a negative number, so its loop
+  -- ran ZERO times and decode() reported success on a corrupt file.  A negative
+  -- count is impossible for a real file, so the header must reject it at the
+  -- point of read with the SAME code layers.parse already uses.
+  --
+  -- Why 30000 (the existing absurd_layer_count.nbs) does NOT catch this: 30000
+  -- is still positive (< 32768) and is rejected downstream by layers.parse's
+  -- byte-budget guard.  The wrap only occurs at >= 32768; these cases pin the
+  -- signed boundary specifically.
+
+  it("16. a raw layer_count of 60000 (wraps to -5536) raises E_BAD_LAYER_COUNT", function()
+    local err = capture(function()
+      return parse(new_header({ version = 5, layer_count = 60000 }))
+    end)
+    expect.equal(err.code, "E_BAD_LAYER_COUNT")
+    expect.equal(err.layer_count, -5536)
+    expect.equal(err.version, 5)
+    expect.truthy(type(err.msg) == "string" and #err.msg > 0)
+  end)
+
+  it("17. a raw layer_count of 65535 (wraps to -1) raises E_BAD_LAYER_COUNT", function()
+    local err = capture(function()
+      return parse(new_header({ version = 5, layer_count = 65535 }))
+    end)
+    expect.equal(err.code, "E_BAD_LAYER_COUNT")
+    expect.equal(err.layer_count, -1)
+    expect.equal(err.version, 5)
+    expect.truthy(type(err.msg) == "string" and #err.msg > 0)
+  end)
+
+  it("18. POSITIVE CONTROL: a raw layer_count of 200 still parses to 200", function()
+    -- The practical maximum (the format docs warn above 200).  The signed-wrap
+    -- guard must never reject a legitimate count.
+    local h = parse(new_header({ version = 5, layer_count = 200 }))
+    expect.equal(h.layer_count, 200)
+  end)
+
+  it("19. the guard also applies on the LEGACY v0 path", function()
+    local err = capture(function()
+      return parse(legacy_header({ song_length = 10, layer_count = 65535 }))
+    end)
+    expect.equal(err.code, "E_BAD_LAYER_COUNT")
+    expect.equal(err.layer_count, -1)
+    expect.equal(err.version, 0)
+  end)
+end)
