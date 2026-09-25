@@ -211,7 +211,7 @@ function clock.new_virtual(start_ms)
   -- pending_count(): how many handles are still awaiting a deadline.  Fired and
   -- cancelled handles are retired as they are resolved, so this stays small no
   -- matter how many events a long run has already scheduled.  Exposed for the
-  -- bound assertion in tests/player/clock_spec.lua and for diagnostics.
+  -- bound assertion in the test suite and for diagnostics.
   function vclock.pending_count()
     return #state.pending
   end
@@ -315,7 +315,7 @@ function clock.new_os()
   -- real consumer of this adapter -- paces itself through after()/now_ms() (see
   -- the header caveat) and never calls this.  It stays a PUBLIC ADAPTER
   -- AFFORDANCE for a caller that wants to block on an absolute deadline, and
-  -- tests/player/clock_spec.lua pins its arithmetic (case 13).
+  -- The test suite pins its arithmetic.
   function adapter.sleep_until(deadline_ms)
     local remaining = (deadline_ms - adapter.now_ms()) / 1000
     if remaining < 0 then

@@ -78,7 +78,7 @@
 -- layer: it guarantees per-instance once-only semantics for any DIRECT user of
 -- dispatch, independent of however a caller aggregates on top.  So
 -- d:warnings()/d:reset() have no production caller but stay part of the FROZEN
--- public interface and are asserted by tests/player/dispatch_spec.lua.
+-- public interface and are asserted by the test suite.
 --
 -- ---------------------------------------------------------------------------
 -- REFUSAL vs ERROR  (the distinction is deliberate and observable)

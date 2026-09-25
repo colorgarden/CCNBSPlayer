@@ -40,7 +40,7 @@
 --     this wrong tells the user "one speaker is enough" while a note is
 --     silently dropped.
 --
--- Worked examples pinned by tests/nbs/speakers_spec.lua:
+-- Worked examples (verified by the test suite):
 --   (vanilla=1, playSound=1) -> 2   -- NOT 1
 --   (vanilla=8, playSound=1) -> 2
 --   (vanilla=8, playSound=2) -> 3

@@ -36,7 +36,7 @@
 -- with:  package.path = "/lib/?.lua;/lib/?/init.lua;" .. package.path
 --
 -- ===========================================================================
--- PURITY (for tests/installer_spec.lua)
+-- PURITY (verified by the test suite)
 -- ===========================================================================
 -- All decision logic is PURE and lives on the returned table: the file list,
 -- URL construction, target mapping, the install plan and the overwrite rules.
@@ -285,7 +285,7 @@ end
 -- ---------------------------------------------------------------------------
 
 -- install(ioenv) performs the actual install through the injected seams.
--- See the header and tests/installer_spec.lua for the exact contract.
+-- See the header for the exact contract; the test suite verifies it.
 function installer.install(ioenv)
   ioenv = ioenv or {}
 

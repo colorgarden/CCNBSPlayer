@@ -31,7 +31,7 @@
 --                              args   = { ... } }
 --   record.drain() -> returns the accumulated calls and CLEARS the buffer.
 --
--- HARD RULES enforced by tests/player/speaker_spec.lua:
+-- HARD RULES (enforced by the test suite):
 --
 --   * This module must NOT hard-code a call to the peripheral type-search
 --     shortcut (the find helper).  Discovery uses ONLY getNames() and getType();

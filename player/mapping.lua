@@ -24,7 +24,7 @@
 --     speaker_volume(v) = clamp(round_half_up(v / 100 * 3), 0, 3)
 --
 -- Rounding is HALF UP: `floor(x + 0.5)`, so 1.5 -> 2. This is documented and
--- pinned by tests/player/mapping_spec.lua.  Inputs outside 0..100 clamp.
+-- pinned by the test suite.  Inputs outside 0..100 clamp.
 --
 -- ---------------------------------------------------------------------------
 -- 2. Pitch (playNote semitones) is NOT CLAMPED -- product decision
@@ -71,7 +71,7 @@ local mapping = {}
 
 -- The boundaries of the native NBS key range (a two-octave window).  This is the
 -- AUTHORITATIVE definition: nbs/analyze.lua references these two values for its
--- extended-range boundary, and tests/player/mapping_spec.lua pins them, so there
+-- extended-range boundary, and the test suite pins them, so there
 -- is exactly ONE copy of 33 / 57 in the codebase.  These are NOT clamp bounds
 -- for pitch_semitones -- see the module header.
 mapping.NATIVE_MIN_KEY = 33
