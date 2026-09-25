@@ -45,6 +45,37 @@ local clock = require("player.clock")
 local tempo = require("player.tempo")
 
 -- ---------------------------------------------------------------------------
+-- Project root (run.lua seeds package.path with "<root>/?.lua" first)
+-- ---------------------------------------------------------------------------
+
+local function project_root()
+  local first = package.path:match("^(.-)/%?%.lua")
+  if first == nil or first == "" then
+    return "."
+  end
+  return first
+end
+
+local ROOT = project_root()
+
+local function join(root, rel)
+  if root == "." or root == "" then
+    return rel
+  end
+  return root .. "/" .. rel
+end
+
+local function read_file(path)
+  local handle = io.open(path, "rb")
+  if not handle then
+    return nil
+  end
+  local data = handle:read("*a") or ""
+  handle:close()
+  return data
+end
+
+-- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
@@ -190,7 +221,8 @@ end)
 
 -- build_rounding_song(count): a count-event song, one event per 1000/15 ms
 -- (66.667 ms), event i at t_ms = i * (1000/15).  Runs it on a rounding clock
--- and returns stats, the fired order and the observed end drift.
+-- and returns stats, the fired order, the observed end drift and the bare warn
+-- codes collected from the scheduler.
 local function run_rounding_song(count)
   local tick = tempo.tick_ms({ ticks_per_second = 15 }) -- 66.666...
   local events = {}
@@ -200,19 +232,23 @@ local function run_rounding_song(count)
 
   local rc = rounding_clock(0)
   local fired = {}
-  local t = tempo.new({ clock = rc })
+  local warns = {}
+  local t = tempo.new({
+    clock = rc,
+    warn = function(code) warns[#warns + 1] = code end,
+  })
   t:play(events, function(ev) fired[#fired + 1] = ev.index end)
   clock.advance_to(rc, 1000000)
 
   local stats = t:stats()
   local end_drift = math.abs(stats.actual_end_ms - stats.ideal_end_ms)
-  return stats, fired, tick, end_drift
+  return stats, fired, tick, end_drift, warns
 end
 
 describe("tempo drift correction under os.startTimer-like rounding", function()
   it("5. 500 events at 66.667 ms stay within one tick of the ideal timeline", function()
     local count = 500
-    local stats, fired, tick, end_drift = run_rounding_song(count)
+    local stats, fired, tick, end_drift, warns = run_rounding_song(count)
 
     -- Every event fired exactly once, in order.
     expect.equal(#fired, count)
@@ -234,20 +270,30 @@ describe("tempo drift correction under os.startTimer-like rounding", function()
     local naive_bound = count * 16.667
     expect.truthy(naive_bound > end_drift)
 
+    -- B2 REGRESSION GUARD: 66.667 ms is ABOVE the 50 ms timer granularity, so
+    -- the rounding clock's compensating delays are normal scheduling -- not a
+    -- clamp.  The old delay-based rule counted them (167 of 500!) and warned.
+    expect.equal(#warns, 0)
+    expect.equal(stats.clamped_ticks, 0)
+
     io.write("    CASE-5 count=" .. count
       .. " tick_ms=" .. tostring(tick)
       .. " ideal_end_ms=" .. tostring(stats.ideal_end_ms)
       .. " actual_end_ms=" .. tostring(stats.actual_end_ms)
       .. " end_drift_ms=" .. tostring(end_drift)
       .. " naive_bound_ms=" .. tostring(naive_bound)
-      .. " max_drift_ms=" .. tostring(stats.max_drift_ms) .. "\n")
+      .. " max_drift_ms=" .. tostring(stats.max_drift_ms)
+      .. " clamped_ticks=" .. tostring(stats.clamped_ticks)
+      .. " warns=" .. tostring(#warns) .. "\n")
   end)
 
   it("6. max_drift_ms is bounded by one rounding step (<= 50), not growing with index", function()
-    local stats = run_rounding_song(500)
+    local stats, _, _, _, warns = run_rounding_song(500)
     expect.truthy(stats.max_drift_ms <= 50)
+    expect.equal(#warns, 0)
     io.write("    CASE-6 max_drift_ms=" .. tostring(stats.max_drift_ms)
-      .. " (bound=50)\n")
+      .. " (bound=50) clamped_ticks=" .. tostring(stats.clamped_ticks)
+      .. " warns=" .. tostring(#warns) .. "\n")
   end)
 end)
 
@@ -446,5 +492,204 @@ describe("tempo never touches the real clock", function()
 
     expect.equal(ok, true)
     expect.equal(err, nil)
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 15-18. B2: the clamp warning is driven by the NOMINAL tick interval, never
+-- by an individual zero/negative delay (which just means "due now").
+-- ---------------------------------------------------------------------------
+
+describe("tempo clamp warning is driven by the nominal tick interval", function()
+  it("15. two simultaneous events (a chord) -> zero clamps, NO tempo-clamp warning", function()
+    -- delay_ms == 0 for the second note of the chord is NOT a clamp: the event
+    -- is due now.  The old rule warned here on virtually every song.
+    local vc = clock.new_virtual()
+    local warns = {}
+    local order = {}
+    local t = tempo.new({
+      clock = vc,
+      warn = function(code) warns[#warns + 1] = code end,
+    })
+
+    t:play({ { t_ms = 100, id = "A" }, { t_ms = 100, id = "B" } }, function(ev)
+      order[#order + 1] = ev.id
+    end)
+    clock.advance_to(vc, 1000)
+
+    expect.equal(t:stats().clamped_ticks, 0)
+    expect.equal(#warns, 0)
+    expect.sequence_equal(order, { "A", "B" })
+    expect.equal(t:stats().ticks_scheduled, 2)
+    io.write("    CASE-15 chord clamped_ticks="
+      .. tostring(t:stats().clamped_ticks) .. " warns=" .. tostring(#warns)
+      .. " fired=" .. tostring(#order) .. "\n")
+  end)
+
+  it("16. a single event at t_ms = 0 (the first note of a song) -> zero clamps, no warning", function()
+    local vc = clock.new_virtual()
+    local warns = {}
+    local fired = 0
+    local t = tempo.new({
+      clock = vc,
+      warn = function(code) warns[#warns + 1] = code end,
+    })
+
+    t:play({ { t_ms = 0, id = "first" } }, function() fired = fired + 1 end)
+    clock.advance_to(vc, 1000)
+
+    expect.equal(t:stats().clamped_ticks, 0)
+    expect.equal(#warns, 0)
+    expect.equal(fired, 1)
+    expect.equal(t:stats().ticks_scheduled, 1)
+    io.write("    CASE-16 t0 clamped_ticks="
+      .. tostring(t:stats().clamped_ticks) .. " warns=" .. tostring(#warns)
+      .. " fired=" .. tostring(fired) .. "\n")
+  end)
+
+  it("17. a genuinely sub-granularity tempo (20 ms per tick) warns exactly once; every event fires", function()
+    -- opts.tick_ms = 20 is BELOW the 50 ms world-tick granularity: the clock
+    -- cannot represent the requested tempo, so the clamp is real and is
+    -- reported once for the run.
+    local times = {}
+    for i = 0, 9 do
+      times[i + 1] = i * 20
+    end
+
+    local vc = clock.new_virtual()
+    local warns = {}
+    local fired = {}
+    local t = tempo.new({
+      clock = vc,
+      tick_ms = 20,
+      warn = function(code) warns[#warns + 1] = code end,
+    })
+
+    t:play(make_events(times), function(ev) fired[#fired + 1] = ev.t_ms end)
+    clock.advance_to(vc, 100000)
+
+    local stats = t:stats()
+    expect.truthy(stats.clamped_ticks > 0)
+    expect.equal(#warns, 1)
+    expect.equal(warns[1], tempo.CLAMP_WARN_CODE)
+    expect.sequence_equal(fired, times)
+    expect.equal(stats.ticks_scheduled, #times)
+    io.write("    CASE-17 sub-granularity clamped_ticks="
+      .. tostring(stats.clamped_ticks) .. " warns=" .. tostring(#warns)
+      .. " code=" .. tostring(warns[1]) .. " fired=" .. tostring(#fired) .. "\n")
+  end)
+
+  it("18. a normal 100 ms tempo -> ZERO tempo-clamp warnings (the assertion that catches B2)", function()
+    local times = {}
+    for i = 0, 9 do
+      times[i + 1] = i * 100
+    end
+
+    local vc = clock.new_virtual()
+    local warns = {}
+    local fired = {}
+    local t = tempo.new({
+      clock = vc,
+      tick_ms = 100,
+      warn = function(code) warns[#warns + 1] = code end,
+    })
+
+    t:play(make_events(times), function(ev) fired[#fired + 1] = ev.t_ms end)
+    clock.advance_to(vc, 100000)
+
+    expect.equal(#warns, 0)
+    expect.equal(t:stats().clamped_ticks, 0)
+    expect.sequence_equal(fired, times)
+    expect.equal(t:stats().ticks_scheduled, #times)
+    io.write("    CASE-18 normal clamped_ticks="
+      .. tostring(t:stats().clamped_ticks) .. " warns=" .. tostring(#warns)
+      .. " fired=" .. tostring(#fired) .. "\n")
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 19-20. B4 backstop: a corrupt (non-finite or non-positive) tick interval
+-- must fail LOUDLY here too, and a NaN deadline must never reach the clock.
+-- ---------------------------------------------------------------------------
+
+describe("tempo rejects a corrupt tick interval instead of scheduling a dead deadline", function()
+  it("19. tempo.new refuses tick_ms = 0, negative, NaN and infinity", function()
+    local bad_values = { 0, -20, 0 / 0, math.huge }
+    for index = 1, #bad_values do
+      local vc = clock.new_virtual()
+      local called, err = pcall(function()
+        tempo.new({ clock = vc, tick_ms = bad_values[index] })
+      end)
+      expect.equal(called, false)
+      expect.equal(type(err), "table")
+      expect.equal(err.code, "E_BAD_TICK_MS")
+      expect.truthy(type(err.msg) == "string" and #err.msg > 0)
+      io.write("    CASE-19 refused tick_ms=" .. tostring(bad_values[index])
+        .. " code=" .. tostring(err.code) .. "\n")
+    end
+  end)
+
+  it("20. play refuses a non-finite event deadline: nothing is scheduled, nothing can hang", function()
+    local vc = clock.new_virtual()
+    local t = tempo.new({ clock = vc })
+
+    local called, err = pcall(function()
+      t:play({ { t_ms = 0 / 0, id = 1 } }, function() end)
+    end)
+
+    expect.equal(called, false)
+    expect.equal(type(err), "table")
+    expect.equal(err.code, "E_BAD_DELAY")
+    expect.truthy(type(err.msg) == "string" and #err.msg > 0)
+
+    -- The refusal happened BEFORE any clock request: advancing forever runs
+    -- zero callbacks (contrast the pre-fix behaviour: a deadline that never
+    -- fires).
+    expect.equal(clock.advance_to(vc, 1000000), 0)
+    expect.equal(t:stats().ticks_scheduled, 0)
+    io.write("    CASE-20 refused NaN deadline code=" .. tostring(err.code)
+      .. " callbacks=0\n")
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 21. B4 positive control: a REAL in-range fixture still plays end to end.
+-- ---------------------------------------------------------------------------
+
+describe("tempo end-to-end on a real fixture (positive control)", function()
+  it("21. v4.nbs decodes, plans and plays every event with no clamp warning", function()
+    local decode = require("nbs.decode")
+    local analyze = require("nbs.analyze")
+    local plan = require("player.plan")
+
+    local bytes = read_file(join(ROOT, "tests/fixtures/v4.nbs"))
+    expect.truthy(bytes ~= nil)
+
+    local decoded = decode.decode(bytes)
+    expect.equal(decoded.ok, true)
+
+    local analysis = analyze.analyze(decoded.song)
+    local events = plan.plan(decoded.song, analysis)
+    expect.truthy(#events > 0)
+
+    local vc = clock.new_virtual()
+    local warns = {}
+    local fired = 0
+    local t = tempo.new({
+      clock = vc,
+      tick_ms = analysis.tick_ms,
+      warn = function(code) warns[#warns + 1] = code end,
+    })
+    t:play(events, function() fired = fired + 1 end)
+
+    clock.advance_to(vc, events[#events].t_ms + 1)
+
+    expect.equal(fired, #events)
+    expect.equal(t:stats().ticks_scheduled, #events)
+    expect.equal(t:stats().clamped_ticks, 0)
+    expect.equal(#warns, 0)
+    io.write("    CASE-21 v4.nbs tick_ms=" .. tostring(analysis.tick_ms)
+      .. " events=" .. tostring(#events) .. " fired=" .. tostring(fired)
+      .. " warns=" .. tostring(#warns) .. "\n")
   end)
 end)

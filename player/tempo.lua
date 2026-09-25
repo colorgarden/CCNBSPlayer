@@ -29,14 +29,40 @@
 -- request, so drift stays BOUNDED (about one rounding step) instead of growing
 -- without limit.  This is the entire point of the module.
 --
--- DELAYS BELOW THE TIMER GRANULARITY
+-- TEMPO REPRESENTABILITY AND THE CLAMP WARNING
 -- ---------------------------------------------------------------------------
--- A required delay shorter than MIN_TIMER_MS (0.05 s) is still scheduled -- it
--- is neither silently rounded nor skipped -- but it is counted in
--- stats.clamped_ticks and reported ONCE per run via the optional warn callback
--- with the bare code CLAMP_WARN_CODE.  (On a virtual clock a sub-50 ms delay is
--- exact; on the real CC:T clock the primitive will round it up, hence the
--- warning.)
+-- "Clamped" describes a REAL timing limitation: the song's NOMINAL tick
+-- interval -- opts.tick_ms, i.e. 1000 / analysis.ticks_per_second -- is itself
+-- shorter than MIN_TIMER_MS (0.05 s), so the injected clock cannot represent
+-- the requested tempo and rounds every delay UP to the next world tick.  Only
+-- then are events counted in stats.clamped_ticks (one per event scheduled
+-- while the run is clamp-active) and reported ONCE per run via the optional
+-- warn callback with the bare code CLAMP_WARN_CODE.  A sub-granularity event
+-- is still scheduled, never rounded away or skipped; on a virtual clock the
+-- delay is exact, on the real CC:T clock the primitive rounds it up.
+--
+-- A delay of zero or less is NOT a clamp: it means "this event is DUE NOW".
+-- The first note of virtually every song sits at t_ms = 0, and every
+-- simultaneous note of a chord shares its tick's deadline, so treating those
+-- as clamped made the warning fire on almost every song and devalued it.
+-- Such events are scheduled immediately and are neither counted nor warned
+-- about -- that was the spurious-warning defect (B2).
+--
+-- opts.tick_ms is the AUTHORITATIVE nominal interval.  When a caller omits it
+-- the scheduler derives the SMALLEST POSITIVE GAP between distinct event
+-- times; distinct ticks are whole multiples of the nominal interval apart, so
+-- that gap can never UNDER-estimate the interval and a genuinely
+-- sub-granularity song still warns.
+--
+-- The nominal interval is assumed validated UPSTREAM: nbs/header.lua rejects
+-- a non-positive stored tempo as E_BAD_TEMPO, so nbs.decode never yields a
+-- song whose analysis has a non-finite tick_ms.  DEFENCE IN DEPTH applies
+-- here anyway: tempo.new refuses a non-finite or non-positive opts.tick_ms
+-- outright, and the scheduler refuses to hand the clock a non-finite delay.
+-- A corrupt tempo must fail LOUDLY and IMMEDIATELY rather than silently
+-- scheduling a callback that can never fire; a NaN deadline must never enter
+-- the clock.  A tempo of 0 is corrupt input, not a slow song: it is NEVER
+-- clamped into something playable.
 --
 -- THE CLOCK SEAM AND ITS CALLING CONVENTION (VERIFIED TRAP)
 -- ---------------------------------------------------------------------------
@@ -59,18 +85,68 @@
 
 local tempo = {}
 
--- The bare warning code emitted when a tick's delay is below MIN_TIMER_MS.
+-- The bare warning code emitted when the song's NOMINAL tick interval is below
+-- MIN_TIMER_MS (see the header).  Never fired merely because one delay is 0.
 tempo.CLAMP_WARN_CODE = "tempo-clamp"
 
--- The os.startTimer world-tick granularity, in milliseconds.
+-- The os.startTimer world-tick granularity, in milliseconds.  A NOMINAL tick
+-- interval below this cannot be represented by the clock at all.
 tempo.MIN_TIMER_MS = 50
+
+-- is_finite_number(value): true for a real, finite number; rejects NaN (the
+-- only value not equal to itself) and both infinities.
+local function is_finite_number(value)
+  return type(value) == "number"
+    and value == value
+    and value ~= math.huge
+    and value ~= -math.huge
+end
+
+-- bad_tick_ms(origin, value): the typed refusal for a corrupt nominal interval.
+-- The decoder rejects a non-positive stored tempo first (E_BAD_TEMPO); this is
+-- the tempo module's own backstop for a caller that hands the interval over
+-- directly.
+local function bad_tick_ms(origin, value)
+  return {
+    code = "E_BAD_TICK_MS",
+    msg = origin .. ": the nominal tick interval must be a finite, positive "
+      .. "number of milliseconds (a zero/NaN tempo is corrupt input, not a "
+      .. "slow song); got " .. tostring(value),
+    value = value,
+  }
+end
 
 -- tempo.tick_ms(analysis) -> number
 --
 -- The nominal duration of one tick, exposed for consumers.  Analysis reports
--- ticks_per_second directly; the tempo itself is its reciprocal.
+-- ticks_per_second directly; the tempo itself is its reciprocal.  The backstop
+-- above applies: a non-finite or non-positive rate is refused loudly instead
+-- of returning inf/NaN to a scheduler.
 function tempo.tick_ms(analysis)
-  return 1000 / analysis.ticks_per_second
+  local ticks_per_second = analysis.ticks_per_second
+  if not is_finite_number(ticks_per_second) or ticks_per_second <= 0 then
+    error(bad_tick_ms("tempo.tick_ms", ticks_per_second), 2)
+  end
+  return 1000 / ticks_per_second
+end
+
+-- infer_tick_ms(sorted_events) -> number | nil
+--
+-- The smallest positive gap between the t_ms of consecutive events.  Because
+-- distinct ticks are whole multiples of the nominal interval apart, this gap
+-- is an UPPER BOUND on the true interval: it can never under-report a
+-- sub-granularity tempo, so a caller that does not pass opts.tick_ms still
+-- gets the clamp warning when the song genuinely needs it.  nil when no two
+-- distinct event times exist.
+local function infer_tick_ms(sorted_events)
+  local smallest = nil
+  for index = 2, #sorted_events do
+    local gap = sorted_events[index].t_ms - sorted_events[index - 1].t_ms
+    if gap > 0 and (smallest == nil or gap < smallest) then
+      smallest = gap
+    end
+  end
+  return smallest
 end
 
 -- stable_sort_by_t(events) -> array
@@ -112,6 +188,13 @@ Tempo.__index = Tempo
 --   opts.warn     optional function(code); called with a BARE code, at most
 --                 once per code per run.
 --   opts.on_event optional function(event); default callback for play().
+--   opts.tick_ms  optional.  The song's NOMINAL tick interval in milliseconds
+--                 (1000 / ticks_per_second) -- the value the clamp warning is
+--                 derived from.  When supplied it MUST be a finite, positive
+--                 number; a zero/NaN/infinite interval raises the typed table
+--                 E_BAD_TICK_MS immediately (backstop for corrupt input, see
+--                 the header).  When omitted the interval is inferred from the
+--                 events passed to play() (smallest positive gap).
 local function new(opts)
   opts = opts or {}
   local clock_obj = opts.clock
@@ -123,10 +206,19 @@ local function new(opts)
     error("tempo.new: opts.clock must provide now_ms() and after(delay_sec, fn)", 2)
   end
 
+  local tick_ms = opts.tick_ms
+  if tick_ms ~= nil
+    and (not is_finite_number(tick_ms) or tick_ms <= 0) then
+    error(bad_tick_ms("tempo.new", tick_ms), 2)
+  end
+
   local self = setmetatable({}, Tempo)
   self.clock = clock_obj
   self.warn = opts.warn
   self.on_event = opts.on_event
+  self.tick_ms = tick_ms
+  self.nominal_tick_ms = nil
+  self.clamp_active = false
 
   self.events = {}
   self.run_callback = nil
@@ -169,7 +261,28 @@ function Tempo:_schedule_next()
   local now = self.clock.now_ms()
   local delay_ms = ideal - now
 
-  if delay_ms < tempo.MIN_TIMER_MS then
+  -- DEFENCE IN DEPTH (B4): a non-finite delay can never satisfy the clock's
+  -- `deadline <= limit` test, so the session would hang forever.  Refuse it
+  -- loudly here and let NOTHING reach the clock -- corrupt timing input must
+  -- fail, not become a dead deadline.
+  if not is_finite_number(delay_ms) then
+    error({
+      code = "E_BAD_DELAY",
+      msg = string.format(
+        "tempo: refusing to schedule a non-finite delay (%s ms) for t_ms=%s "
+        .. "-- corrupt timing input, not a slow song",
+        tostring(delay_ms), tostring(event.t_ms)),
+      delay_ms = delay_ms,
+      t_ms = event.t_ms,
+    }, 0)
+  end
+
+  -- B2: whether an event is "clamped" is a property of the song's NOMINAL
+  -- tempo, never of this delay.  A zero/negative delay simply means the event
+  -- is due now (the first note, or a chord's later notes) and is NOT counted.
+  -- In a genuinely sub-granularity song every scheduled event counts, because
+  -- the clock cannot represent the requested tempo at all.
+  if self.clamp_active then
     self.metrics.clamped_ticks = self.metrics.clamped_ticks + 1
     self:_warn_once()
   end
@@ -243,6 +356,20 @@ function Tempo:play(events, on_event)
     clamped_ticks = 0,
   }
 
+  -- The NOMINAL tick interval decides clamping (see the header).  An explicit
+  -- opts.tick_ms is authoritative; otherwise derive the smallest positive gap
+  -- between distinct event times.  A non-finite interval is corrupt input:
+  -- refuse it before a single deadline is computed.
+  local nominal = self.tick_ms
+  if nominal == nil then
+    nominal = infer_tick_ms(self.events)
+  end
+  if nominal ~= nil and (not is_finite_number(nominal) or nominal <= 0) then
+    error(bad_tick_ms("tempo.play", nominal), 0)
+  end
+  self.nominal_tick_ms = nominal
+  self.clamp_active = nominal ~= nil and nominal < tempo.MIN_TIMER_MS
+
   self:_schedule_next()
   return self
 end
@@ -261,7 +388,10 @@ end
 
 -- t:stats() -> table
 --
--- Live metrics for the current (or most recent) run.
+-- Live metrics for the current (or most recent) run.  `clamped_ticks` counts
+-- events scheduled while the song's NOMINAL tick interval was below
+-- MIN_TIMER_MS -- i.e. events whose delay the clock cannot represent
+-- faithfully -- NOT events that merely happened to be due immediately.
 function Tempo:stats()
   return self.metrics
 end

@@ -103,6 +103,17 @@
 --     iterations, and let the corrupt file decode as a success).  The code is
 --     the SAME one layers.parse already raises for an unsustainable count, so
 --     callers branch on a single consistent `.code`.
+--   * A NON-POSITIVE tempo_raw (<= 0) raises a TYPED ERROR TABLE
+--     { code = "E_BAD_TEMPO", msg = <string>, tempo_raw = <n>,
+--       version = <n> } via error(tbl, 0), and parsing stops immediately.
+--     tempo_raw is spec-faithfully a signed i16, so 0 and negative values are
+--     representable on disk.  Downstream, tick_ms = 1000 / (tempo_raw / 100):
+--     a stored 0 makes tick_ms INFINITE and the tick-0 event's t_ms becomes
+--     NaN, so the scheduler would request a deadline that can never fire and
+--     the session would never end; a negative tempo yields a negative (also
+--     unusable) tick_ms.  A tempo <= 0 is corrupt input -- not a slow song --
+--     so it is rejected at the point of first trust instead of being clamped
+--     into something playable.
 --
 -- Lua 5.2 / Cobalt constraints honoured here: no `//`, no bitwise operators, no
 -- math.maxinteger, no collectgarbage, no string.dump, no os.exit, no utf8.*.
@@ -199,6 +210,26 @@ function header.parse(r)
   local original_author = r:read_string()
   local description = r:read_string()
   local tempo_raw = r:i16()
+
+  -- A stored tempo <= 0 is corrupt input, not a slow song.  This is the point
+  -- where the value is FIRST trusted: downstream `tick_ms = 1000 / (tempo/100)`
+  -- would be infinite for 0, and the tick-0 event's `t_ms = tick * tick_ms`
+  -- would then be NaN -- a deadline the scheduler's clock can never satisfy,
+  -- so the session would never end.  Reject it here with the same typed-table
+  -- convention the other header errors use, so nbs.decode surfaces
+  -- E_BAD_TEMPO instead of handing out a song that cannot be played.
+  if tempo_raw <= 0 then
+    error({
+      code = "E_BAD_TEMPO",
+      msg = string.format(
+        "non-positive tempo_raw %d (raw signed i16, hundredths of a tick per "
+        .. "second; corrupt header -- it would divide by zero downstream)",
+        tempo_raw),
+      tempo_raw = tempo_raw,
+      version = version,
+    }, 0)
+  end
+
   local autosave = r:u8()
   local autosave_duration = r:u8()
   local time_signature = r:u8()

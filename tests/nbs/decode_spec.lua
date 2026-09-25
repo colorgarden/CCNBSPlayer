@@ -271,6 +271,8 @@ local CORPUS = {
   { name = "cyclic_jumps.nbs",           code = "E_TOO_MANY_TICKS" },
   { name = "truncated_layers.nbs",       code = "E_TRUNCATED" },
   { name = "huge_declared_string.nbs",   code = "E_TRUNCATED" },
+  { name = "tempo_zero.nbs",             code = "E_BAD_TEMPO" },
+  { name = "tempo_negative.nbs",         code = "E_BAD_TEMPO" },
 }
 
 local TIME_BOUND_SECONDS = 1.0
@@ -419,6 +421,59 @@ describe("nbs.decode malformed corpus", function()
       expect.truthy(type(result.error.code) == "string" and #result.error.code > 0)
       expect.truthy(type(result.error.msg) == "string" and #result.error.msg > 0)
     end
+  end)
+
+  it("6c. DECODE-LEVEL (B4): tempo 0 / negative -> ok == false E_BAD_TEMPO, no raise, well under 1s", function()
+    -- A structurally valid v5 file whose stored tempo is 0 (or negative) used
+    -- to decode as a SUCCESS.  Downstream that produced tick_ms = inf and a
+    -- NaN event deadline, so the session could never end.  The header guard
+    -- rejects it; the boundary must surface the typed table unchanged.
+    for _, name in ipairs({ "tempo_zero.nbs", "tempo_negative.nbs" }) do
+      local bytes = read_file(join(CORPUS_DIR, name))
+      expect.truthy(bytes ~= nil)
+
+      local started = os.clock()
+      local called, result = pcall(decode.decode, bytes)
+      local elapsed = os.clock() - started
+
+      expect.truthy(called) -- decode never raises
+      expect.equal(type(result), "table")
+      expect.equal(result.ok, false)
+      expect.equal(type(result.error), "table")
+      expect.equal(result.error.code, "E_BAD_TEMPO")
+      expect.truthy(type(result.error.msg) == "string" and #result.error.msg > 0)
+      expect.truthy(elapsed < TIME_BOUND_SECONDS)
+
+      io.write(string.format("    B4 %-20s code=%-12s elapsed=%.4fs\n",
+        name, result.error.code, elapsed))
+    end
+  end)
+
+  it("6d. REGRESSION (B4): the CALLER path returns a clean error instead of a never-ending session", function()
+    -- The hang was reachable through the public library: decode() succeeded,
+    -- analyze() reported tick_ms = inf, the first event's t_ms was NaN and the
+    -- tempo scheduler queued a deadline the clock could never satisfy.  With
+    -- the guard the caller never obtains a song at all -- decode returns a
+    -- typed error and `.song` stays nil, so analyze/plan/tempo are unreachable.
+    local ccnbs = require("ccnbs")
+    local bytes = read_file(join(CORPUS_DIR, "tempo_zero.nbs"))
+    expect.truthy(bytes ~= nil)
+
+    local started = os.clock()
+    local called, result = pcall(ccnbs.decode, bytes)
+    local elapsed = os.clock() - started
+
+    expect.truthy(called)
+    expect.equal(type(result), "table")
+    expect.equal(result.ok, false)
+    expect.equal(result.error.code, "E_BAD_TEMPO")
+    expect.equal(result.song, nil)
+    expect.truthy(elapsed < TIME_BOUND_SECONDS)
+
+    io.write(string.format(
+      "    B4-CALLER ok=%s code=%s song=%s elapsed=%.4fs\n",
+      tostring(result.ok), tostring(result.error.code),
+      tostring(result.song), elapsed))
   end)
 
   it("7. a truncated-but-parseable file fails with a precise code", function()

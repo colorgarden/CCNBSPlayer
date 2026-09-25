@@ -63,7 +63,11 @@
 --
 -- ERROR CODES surfaced (all defined inside the sections; no parallel set here):
 --   E_TRUNCATED, E_UNSUPPORTED_VERSION, E_BAD_JUMP, E_LAYER_OVERFLOW,
---   E_TOO_MANY_TICKS, E_BAD_LAYER_COUNT, E_BAD_INSTRUMENT_COUNT, E_INTERNAL.
+--   E_TOO_MANY_TICKS, E_BAD_LAYER_COUNT, E_BAD_INSTRUMENT_COUNT, E_BAD_TEMPO,
+--   E_INTERNAL.
+--   E_BAD_TEMPO is raised by header.parse when the stored tempo is <= 0 (a
+--   corrupt header); it reaches callers through the pass-through pcall below
+--   unchanged, exactly like the other section-parser table errors.
 --
 -- Lua 5.2 / Cobalt constraints honoured: no `//`, no bitwise operators, no
 -- utf8.*, no math.maxinteger, no collectgarbage, no string.dump, no os.exit.

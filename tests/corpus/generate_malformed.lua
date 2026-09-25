@@ -241,5 +241,47 @@ write_file("huge_declared_string.nbs",
     .. i32(2147483647) .. string.rep("A", 40),
   "E_TRUNCATED", "name length 2^31-1, 40 present")
 
+-- ---------------------------------------------------------------------------
+-- 13. tempo_zero.nbs / tempo_negative.nbs -- STRUCTURALLY VALID v5 files whose
+--     stored tempo is 0 / negative.
+--
+--     Everything after the header is well-formed (one note at tick 1 and one
+--     layer record), so before the guard these files decoded as SUCCESS.  The
+--     stored tempo is then divided downstream (tick_ms = 1000 / tps): 0 makes
+--     tick_ms infinite, the first event's t_ms = tick * tick_ms is NaN for
+--     tick 0, and the scheduler queues a deadline the clock can never satisfy
+--     -- the session never ends.  nbs/header.lua now rejects any tempo_raw <= 0
+--     with E_BAD_TEMPO at the point of read.
+--
+--     tempo_raw is a SIGNED i16 on disk, so a negative value IS representable
+--     (0xFF9C reads as -100) and gets its own file.  The zero file is the exact
+--     B4 reproduction: a structurally valid song that must be rejected as
+--     malformed rather than played.
+-- ---------------------------------------------------------------------------
+
+-- A well-formed v5 note record (nbs/notes.lua field order).
+local function note_v5(tick_jump, layer_jump, instrument, key)
+  return i16(tick_jump) .. i16(layer_jump) .. s(instrument) .. s(key)
+    .. s(100) .. s(100) .. i16(0) .. i16(0)
+end
+
+-- A well-formed v5 layer record: name, lock, volume, panning.
+local function layer_v5(name, lock, volume, panning)
+  return lstr(name) .. s(lock) .. s(volume) .. s(panning)
+end
+
+local function tempo_corrupt_file(tempo_raw)
+  return new_header({ version = 5, layer_count = 1, song_length = 10,
+                      tempo_raw = tempo_raw })
+    .. note_v5(1, 1, 1, 45)
+    .. i16(0) -- notes-section terminator
+    .. layer_v5("L0", 0, 80, 100)
+end
+
+write_file("tempo_zero.nbs", tempo_corrupt_file(0), "E_BAD_TEMPO",
+  "structurally valid v5, stored tempo 0")
+write_file("tempo_negative.nbs", tempo_corrupt_file(-100), "E_BAD_TEMPO",
+  "stored tempo -100 (negative i16 IS representable)")
+
 io.write(string.format("generated %d malformed corpus file(s) in %s\n",
   written, OUT_DIR))

@@ -456,3 +456,57 @@ describe("nbs.header layer_count signed-wrap guard", function()
     expect.equal(err.version, 0)
   end)
 end)
+
+describe("nbs.header tempo guard (zero/negative tempo is corrupt)", function()
+  -- B4 REGRESSION.  tempo_ticks_per_second = tempo_raw / 100 and the tempo
+  -- scheduler divides by it (tick_ms = 1000 / tps).  A stored tempo of 0 makes
+  -- tick_ms INFINITE, so the first event's t_ms = tick * tick_ms is NaN for
+  -- tick 0; the clock is then asked for a NaN deadline, which can never be
+  -- satisfied, and the session never ends.  A tempo <= 0 is impossible for a
+  -- real song: it is corrupt input, not a slow song, so the parser rejects it
+  -- at the point of read with a typed table error (the other header errors'
+  -- convention).
+  --
+  -- tempo_raw is spec-faithfully a SIGNED i16, so a negative value IS
+  -- representable on disk (raw 0xFF9C reads as -100).  The bound must hold on
+  -- both the new-format and the legacy v0 path.
+
+  it("20. tempo_raw 0 raises E_BAD_TEMPO with the offending value", function()
+    local err = capture(function()
+      return parse(new_header({ version = 5, tempo_raw = 0 }))
+    end)
+    expect.equal(err.code, "E_BAD_TEMPO")
+    expect.equal(err.tempo_raw, 0)
+    expect.equal(err.version, 5)
+    expect.truthy(type(err.msg) == "string" and #err.msg > 0)
+    io.write("    TEMPO-GUARD zero code=" .. err.code
+      .. " tempo_raw=" .. tostring(err.tempo_raw) .. "\n")
+  end)
+
+  it("21. tempo_raw -100 (negative i16) raises E_BAD_TEMPO", function()
+    local err = capture(function()
+      return parse(new_header({ version = 5, tempo_raw = -100 }))
+    end)
+    expect.equal(err.code, "E_BAD_TEMPO")
+    expect.equal(err.tempo_raw, -100)
+    expect.equal(err.version, 5)
+    io.write("    TEMPO-GUARD negative code=" .. err.code
+      .. " tempo_raw=" .. tostring(err.tempo_raw) .. "\n")
+  end)
+
+  it("22. the guard also applies on the LEGACY v0 path", function()
+    local err = capture(function()
+      return parse(legacy_header({ song_length = 10, tempo_raw = 0 }))
+    end)
+    expect.equal(err.code, "E_BAD_TEMPO")
+    expect.equal(err.tempo_raw, 0)
+    expect.equal(err.version, 0)
+  end)
+
+  it("23. POSITIVE CONTROL: a normal tempo_raw still parses", function()
+    -- The guard must never reject a legitimate tempo.
+    local h = parse(new_header({ version = 5, tempo_raw = 1000 }))
+    expect.equal(h.tempo_raw, 1000)
+    expect.equal(h.tempo_ticks_per_second, 10)
+  end)
+end)
