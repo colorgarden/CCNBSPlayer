@@ -1,5 +1,15 @@
 -- player/warnings.lua
 --
+-- WHY THE DEFAULT IS ENGLISH (do not "fix" it to Chinese):
+-- A stock CC:Tweaked terminal ships NO CJK font, so Chinese prose renders as
+-- garbage on screen.  English therefore works on ANY computer with ZERO extra
+-- dependencies and is the DEFAULT.  Chinese is opt-in, usable only once a
+-- runtime-fetched pixel-font renderer is available.  BOTH languages live in
+-- ui/i18n.lua; this renderer holds NO prose of its own -- every human-readable
+-- sentence is fetched through i18n.t(key, args) at format time, so switching
+-- the language switches the output.  NEVER hard-code user-facing prose here
+-- again: add a key to both languages in ui/i18n.lua instead.
+--
 -- THE WARNING RENDERER -- the SINGLE place that turns a bare warning code into
 -- a stable, machine-detectable, ONCE-PER-SONG line.
 --
@@ -22,7 +32,7 @@
 -- lives in ccnbs.lua; THIS module does not change it.  What this module owns is
 -- the presentation layer:
 --
---   * the STABLE marker format `WARN[<code>] <Chinese explanation>`, and
+--   * the STABLE marker format `WARN[<code>] <localised sentence>`, and
 --   * the ONCE-PER-SONG rule at the presentation layer, so a line is printed at
 --     most once per renderer/session even if a caller reports the same code
 --     many times.
@@ -75,17 +85,22 @@
 -- THE MARKER FORMAT IS A CONTRACT
 -- ===========================================================================
 -- Every emitted line begins with `WARN[<code>]` followed by a space and a
--- human-readable Chinese explanation, e.g.
---   WARN[extended-range] 本曲含超出原生两个八度的音符（key 27..46），...
---   WARN[speakers] 本曲峰值 9 音符/50ms，需要 2 个扬声器，...
--- The `WARN[<code>]` prefix is machine-detectable and must not change; the
--- prose after it is written in Chinese for the project owner.
+-- human-readable sentence, e.g. (default English)
+--   WARN[extended-range] this song has notes outside the native two octaves ...
+--   WARN[speakers] this song peaks at 9 notes/50ms, needs 2 speakers, ...
+-- The `WARN[<code>]` prefix and the bare CODE are PROTOCOL: tests and scripts
+-- pull them out, so they stay ASCII and must not change.  Only the sentence
+-- AFTER the prefix is localised, via ui/i18n.lua.
 --
 -- Compatibility: Lua 5.2 / CC:Tweaked Cobalt.  No integer division, no bitwise
 -- operators, no utf8.*, no collectgarbage, no string.dump, no os.exit.  This
 -- module never prints directly -- every line goes through opts.emit.
 
 local warnings = {}
+
+-- Prose lives in ui/i18n.lua.  The dependency is DELIBERATELY one-way:
+-- ui/i18n.lua must never require player.warnings, so there is no cycle.
+local i18n = require("ui.i18n")
 
 -- The marker every line begins with.  Machine-detectable, non-negotiable.
 warnings.MARKER_PREFIX = "WARN"
@@ -114,59 +129,59 @@ local function num(value)
   return tostring(value)
 end
 
--- Explain one code in Chinese.  `args` is already normalised to a table (or an
--- empty table); this function reads only the fields it needs and degrades
--- gracefully when a field is absent or of the wrong type.
+-- Explain one code in the ACTIVE language.  `args` is already normalised to a
+-- table (or an empty table); this function reads only the fields it needs and
+-- degrades gracefully when a field is absent or of the wrong type.  ALL prose
+-- comes from ui/i18n.lua -- nothing user-readable is hard-coded here.
 local function explain(code, args)
   if code == warnings.CODES.EXTENDED_RANGE then
     local min_key = args.min_key
     local max_key = args.max_key
     if is_number(min_key) and is_number(max_key) then
-      return "本曲含超出原生两个八度的音符（key " .. num(min_key) .. ".."
-        .. num(max_key) .. "），需安装扩展音域材质包才能听到完整音色"
+      return i18n.t("warn.extended_range.both",
+        { min_key = num(min_key), max_key = num(max_key) })
     elseif is_number(min_key) then
-      return "本曲含超出原生两个八度的音符（最低 key " .. num(min_key)
-        .. "），需安装扩展音域材质包才能听到完整音色"
+      return i18n.t("warn.extended_range.min", { min_key = num(min_key) })
     elseif is_number(max_key) then
-      return "本曲含超出原生两个八度的音符（最高 key " .. num(max_key)
-        .. "），需安装扩展音域材质包才能听到完整音色"
+      return i18n.t("warn.extended_range.max", { max_key = num(max_key) })
     end
-    return "本曲含超出原生两个八度的音符，需安装扩展音域材质包才能听到完整音色"
+    return i18n.t("warn.extended_range.none")
 
   elseif code == warnings.CODES.SPEAKERS then
     local parts = {}
     if is_number(args.peak) then
-      parts[#parts + 1] = "本曲峰值 " .. num(args.peak) .. " 音符/50ms"
+      parts[#parts + 1] = i18n.t("warn.speakers.peak", { peak = num(args.peak) })
     end
     if is_number(args.required) then
-      parts[#parts + 1] = "需要 " .. num(args.required) .. " 个扬声器"
+      parts[#parts + 1] = i18n.t("warn.speakers.required", { required = num(args.required) })
     end
     if is_number(args.found) then
-      parts[#parts + 1] = "实际 " .. num(args.found) .. " 个"
+      parts[#parts + 1] = i18n.t("warn.speakers.found", { found = num(args.found) })
     end
     if is_number(args.dropped) then
-      parts[#parts + 1] = "已丢弃 " .. num(args.dropped) .. " 个音符"
+      parts[#parts + 1] = i18n.t("warn.speakers.dropped", { dropped = num(args.dropped) })
     end
     if #parts == 0 then
-      return "扬声器数量不足，部分音符无法播放"
+      return i18n.t("warn.speakers.none")
     end
-    return table.concat(parts, "，")
+    -- The separator is localised too: Chinese joins with "，", English with ", ".
+    return table.concat(parts, i18n.t("warn.speakers.separator"))
 
   elseif code == warnings.CODES.CUSTOM_INSTRUMENT then
     if is_number(args.count) then
-      return "本曲含 " .. num(args.count) .. " 个自定义乐器，已跳过不播放"
+      return i18n.t("warn.custom_instrument.count", { count = num(args.count) })
     end
-    return "本曲含自定义乐器，已跳过不播放"
+    return i18n.t("warn.custom_instrument.none")
 
   elseif code == warnings.CODES.TEMPO_CLAMP then
-    return "节拍间隔低于 0.05 秒计时粒度，已钳制"
+    return i18n.t("warn.tempo_clamp")
 
   elseif code == warnings.CODES.PLAY_SOUND_PITCH then
-    return "小号音高超出可表示范围，已钳制为近似值"
+    return i18n.t("warn.play_sound_pitch")
   end
 
   -- Unknown code: deterministic generic explanation.
-  return "未知警告码，已按默认方式处理"
+  return i18n.t("warn.unknown")
 end
 
 -- ---------------------------------------------------------------------------
