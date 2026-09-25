@@ -21,7 +21,7 @@
 --   --   after(delay_sec, fn)   -> handle, schedule fn once after delay_sec
 --   --   cancel(handle)         -> boolean, true iff the handle was pending
 --   --   run_due()              -> integer, run every callback now due
---   --   (CC:T adapter only) sleep_until(deadline_ms) -> blocks to deadline
+--   --   (CC:T adapter only, unused by tempo.lua) sleep_until(deadline_ms) -> blocks
 --
 --   clock.new_virtual(start_ms) -> <virtual clock>   -- deterministic
 --   clock.new_os()              -> <CC:T clock>       -- wraps the real clock
@@ -58,9 +58,12 @@
 --   os.epoch("ingame"); after(delay_sec, fn) uses os.startTimer(delay_sec);
 --   run_due() drains `timer` events via os.pullEvent("timer").  os.startTimer
 --   rounds UP to the 0.05 s world tick, so the adapter's timing is only
---   APPROXIMATE and the tempo module compensates; sleep_until(deadline_ms)
---   converts the remaining milliseconds to seconds and calls os.sleep (clamped
---   at 0), letting the scheduler block precisely instead of spinning.
+--   APPROXIMATE; player/tempo.lua compensates by re-requesting (ideal - now)
+--   through after() against a cumulative ideal deadline -- it does NOT use
+--   sleep_until.  sleep_until(deadline_ms) exists as an adapter affordance (it
+--   converts the remaining ms to seconds and calls os.sleep, clamped at 0) and
+--   is exercised here for its arithmetic, but the production scheduler never
+--   calls it.
 --
 --   The adapter is deliberately NOT exercised in a way that blocks: there is no
 --   real event pump in plain Lua.  Cases 12/13 install a fake GLOBAL os and
@@ -450,5 +453,63 @@ describe("virtual clock zero-delay callback", function()
     expect.equal(clock.advance_to(vc, 500), 1)
     expect.equal(fired, true)
     expect.equal(vc.now_ms(), 500)
+  end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- 16. Fired / cancelled handles are RETIRED so the pending list cannot grow
+--     without bound.  A long song schedules one event after another; if every
+--     handle stayed in the pending array forever, the "earliest due" scan would
+--     get progressively more expensive (effectively O(n^2) over the song).
+-- ---------------------------------------------------------------------------
+
+describe("virtual clock retires fired and cancelled handles", function()
+  it("16. several thousand sequential events keep the pending list bounded", function()
+    local vc = clock.new_virtual(0)
+    local fired = 0
+
+    -- A self-rescheduling chain (the tempo scheduler's own pattern): each
+    -- callback queues the next one 1 ms later.
+    local schedule
+    schedule = function(count)
+      if count > 5000 then
+        return
+      end
+      vc.after(0.001, function()
+        fired = fired + 1
+        schedule(count + 1)
+      end)
+    end
+    schedule(1)
+
+    local max_pending = 0
+    for step = 1, 5100 do
+      clock.advance_to(vc, step)
+      local pending = vc.pending_count()
+      if pending > max_pending then
+        max_pending = pending
+      end
+    end
+
+    expect.equal(fired, 5000)
+    -- A live chain holds only the ONE handle that has not fired yet.
+    expect.truthy(max_pending <= 2)
+    io.write("    CASE-16 fired=" .. fired
+      .. " max_pending=" .. max_pending .. "\n")
+  end)
+
+  it("16b. a cancelled handle is retired too", function()
+    local vc = clock.new_virtual(0)
+    local handles = {}
+    for index = 1, 100 do
+      handles[index] = vc.after(1000, function() end)
+    end
+
+    for index = 1, 100 do
+      expect.equal(vc.cancel(handles[index]), true)
+    end
+
+    expect.equal(vc.pending_count(), 0)
+    io.write("    CASE-16b pending_after_cancel=" .. vc.pending_count() .. "\n")
   end)
 end)

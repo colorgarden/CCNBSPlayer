@@ -28,7 +28,9 @@
 --   after(delay_sec, fn)  -> handle, run fn once after delay_sec seconds
 --   cancel(handle)        -> boolean, true iff the handle was still pending
 --   run_due()             -> integer, run every callback already due
---   sleep_until(deadline_ms)   -- CC:T adapter only; see below
+--   pending_count()       -> integer, handles still awaiting a deadline
+--   sleep_until(deadline_ms)   -- CC:T ADAPTER ONLY, and NOT used by the
+--                                production tempo scheduler (see below)
 --
 -- clock.advance_to(vclock, target_ms) -> integer
 --   Advance a VIRTUAL clock to target_ms, running every callback whose
@@ -56,13 +58,18 @@
 --     after(delay, fn)    = os.startTimer(delay)        -- timer id
 --     run_due()           = os.pullEvent("timer") drain
 --     sleep_until(d_ms)   = os.sleep(max(0, d_ms - now_ms()) / 1000)
+--                           (an adapter affordance; NOT used by tempo.lua)
 --
 -- CAVEAT: os.startTimer rounds its delay UP to the next 0.05 s (one world
 -- tick) boundary, so the adapter's wake-ups are only APPROXIMATE -- a timer
 -- requested for 0.13 s fires near 0.15 s.  The adapter therefore must not be
--- trusted for exact musical timing; the tempo scheduler compensates by
--- anchoring each tick to the clock and by sleeping to an absolute deadline with
--- sleep_until rather than accumulating relative delays.
+-- trusted for exact musical timing.  player/tempo.lua -- the real consumer --
+-- compensates by keeping a cumulative IDEAL deadline (start_ms + event.t_ms)
+-- and, for each event, re-requesting through the injected clock's `after` a
+-- delay of (ideal - clock.now_ms()) / 1000, so the rounding error never
+-- accumulates.  It does NOT use sleep_until: that method remains an adapter
+-- affordance for callers that want to block on an absolute deadline, but the
+-- scheduler paces itself exclusively through after()/now_ms().
 --
 -- new_os() reads the global `os` ONLY inside its functions, never at require
 -- time, so this module can be required (and its virtual clock used) in plain
@@ -99,10 +106,13 @@ function clock.new_virtual(start_ms)
   vclock.errors = {} -- captured callback errors, oldest first
 
   -- earliest_due(limit): the pending handle with the smallest (deadline, seq)
-  -- whose deadline is <= limit, or nil.  Handles that fired or were cancelled
-  -- are ignored.  Linear scan is fine: schedules here are tiny.
+  -- whose deadline is <= limit, or nil.  A fired or cancelled handle is
+  -- RETIRED from state.pending (see drain / cancel), so the array holds only
+  -- still-live handles and this linear scan cannot grow without bound over a
+  -- long song.
   local function earliest_due(limit)
     local best = nil
+    local best_index = nil
     for index = 1, #state.pending do
       local handle = state.pending[index]
       if not handle.fired and not handle.cancelled and handle.deadline <= limit then
@@ -110,10 +120,11 @@ function clock.new_virtual(start_ms)
           or handle.deadline < best.deadline
           or (handle.deadline == best.deadline and handle.seq < best.seq) then
           best = handle
+          best_index = index
         end
       end
     end
-    return best
+    return best, best_index
   end
 
   -- drain(limit): run every handle due at or before `limit`, advancing state.now
@@ -123,11 +134,15 @@ function clock.new_virtual(start_ms)
   local function drain(limit)
     local ran = 0
     while true do
-      local handle = earliest_due(limit)
+      local handle, index = earliest_due(limit)
       if handle == nil then
         break
       end
       handle.fired = true
+      -- RETIRE: the handle has fired, so drop it from the pending array now.
+      -- A long song must not accumulate a handle per event (that would make
+      -- every later "earliest due" scan progressively more expensive).
+      table.remove(state.pending, index)
       if handle.deadline > state.now then
         state.now = handle.deadline
       end
@@ -178,11 +193,27 @@ function clock.new_virtual(start_ms)
       return false
     end
     handle.cancelled = true
+    -- RETIRE: drop the cancelled handle from the pending array as well, so a
+    -- run that cancels many handles does not grow the list either.
+    for index = 1, #state.pending do
+      if state.pending[index] == handle then
+        table.remove(state.pending, index)
+        break
+      end
+    end
     return true
   end
 
   function vclock.run_due()
     return drain(state.now)
+  end
+
+  -- pending_count(): how many handles are still awaiting a deadline.  Fired and
+  -- cancelled handles are retired as they are resolved, so this stays small no
+  -- matter how many events a long run has already scheduled.  Exposed for the
+  -- bound assertion in tests/player/clock_spec.lua and for diagnostics.
+  function vclock.pending_count()
+    return #state.pending
   end
 
   return vclock
@@ -279,6 +310,12 @@ function clock.new_os()
 
   -- sleep_until(deadline_ms): block until an absolute deadline.  The remaining
   -- delay is clamped at 0 so a past deadline never produces a negative sleep.
+  --
+  -- UNUSED BY PRODUCTION, RETAINED DELIBERATELY.  player/tempo.lua -- the only
+  -- real consumer of this adapter -- paces itself through after()/now_ms() (see
+  -- the header caveat) and never calls this.  It stays a PUBLIC ADAPTER
+  -- AFFORDANCE for a caller that wants to block on an absolute deadline, and
+  -- tests/player/clock_spec.lua pins its arithmetic (case 13).
   function adapter.sleep_until(deadline_ms)
     local remaining = (deadline_ms - adapter.now_ms()) / 1000
     if remaining < 0 then
