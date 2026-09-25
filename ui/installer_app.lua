@@ -100,11 +100,11 @@ local L10N = {
     ["app.detail_done"] = "Wrote {count} files under /lib. Reboot to finish.",
     ["app.detail_cancelled"] = "Nothing was written.",
     ["app.detail_later"] = "Run /lib/ccnbsplayer after rebooting whenever you like.",
-    ["app.autostart.button"] = "Start at boot: {state}",
-    ["app.autostart.on"] = "ON",
-    ["app.autostart.off"] = "OFF",
+    ["app.autostart.yes"] = "Start at boot: YES",
+    ["app.autostart.no"] = "Start at boot: NO",
     ["app.autostart.pending_on"] = "Autostart will be ENABLED when you click Write.",
     ["app.autostart.pending_off"] = "Autostart will be DISABLED when you click Write.",
+    ["app.autostart.unchanged"] = "Autostart left unchanged (nothing chosen).",
     ["app.btn.start"] = "Install",
     ["app.btn.cancel"] = "Cancel",
     ["app.btn.write"] = "Write",
@@ -138,9 +138,8 @@ local L10N = {
     ["app.detail_done"] = "已写入 {count} 个文件到 /lib，重启后生效。",
     ["app.detail_cancelled"] = "没有写入任何文件。",
     ["app.detail_later"] = "稍后重启，再运行 /lib/ccnbsplayer 即可。",
-    ["app.autostart.button"] = "开机自启动：{state}",
-    ["app.autostart.on"] = "开",
-    ["app.autostart.off"] = "关",
+    ["app.autostart.yes"] = "开机自启动：是",
+    ["app.autostart.no"] = "开机自启动：否",
     ["app.autostart.pending_on"] = "点击“写入”后将启用开机自启动。",
     ["app.autostart.pending_off"] = "点击“写入”后将关闭开机自启动。",
     ["app.btn.start"] = "开始安装",
@@ -176,7 +175,33 @@ local function read_global(name)
   return nil
 end
 
-local function active_language(installer)
+-- chinese_renderable(utf8display) -> boolean.
+--
+-- The installer bootstraps utf8display for ONE reason: so its own interface can
+-- speak Chinese.  But a freshly installed machine has no ui/i18n.lua yet, so
+-- installer.get_language() still reports "en" and the UI came up in English with
+-- a CJK renderer sitting unused beside it.
+--
+-- It PROBES rather than assumes, because the renderer fetches a ~1.7 MB font on
+-- first use and that can fail (host unreachable, no disk space).  Making it draw
+-- one glyph settles the question.  A UI that cannot render Chinese must then
+-- speak English -- NEVER emit raw non-ASCII, which a CC terminal draws as
+-- garbage.
+local function chinese_renderable(utf8display)
+  if type(utf8display) ~= "table" or type(utf8display.strToBimg) ~= "function" then
+    return false
+  end
+  local ok, image = pcall(utf8display.strToBimg, "中", "Q", "B")
+  return ok and type(image) == "table"
+end
+
+-- active_language(installer, prefer_chinese) -> a code present in L10N.
+-- `prefer_chinese` wins when the renderer can actually draw it; otherwise the
+-- installer's own language decides, and that defaults to English.
+local function active_language(installer, prefer_chinese)
+  if prefer_chinese == true and L10N.zh ~= nil then
+    return "zh"
+  end
   local code = app.DEFAULT_LANGUAGE
   if type(installer) == "table" and type(installer.get_language) == "function" then
     local ok, value = pcall(installer.get_language)
@@ -187,11 +212,12 @@ local function active_language(installer)
   return code
 end
 
--- make_tr(installer) -> function(key, args) -> sentence.  Never raises, never
--- returns nil: an unknown key returns the key (a visible, greppable gap).
-local function make_tr(installer)
+-- make_tr(installer, prefer_chinese) -> function(key, args) -> sentence.  Never
+-- raises, never returns nil: an unknown key returns the key (a visible,
+-- greppable gap).
+local function make_tr(installer, prefer_chinese)
   return function(key, args)
-    local table_for = L10N[active_language(installer)] or L10N.en
+    local table_for = L10N[active_language(installer, prefer_chinese)] or L10N.en
     local text = table_for[key]
     if type(text) ~= "string" then
       text = L10N.en[key]
@@ -348,7 +374,13 @@ end
 -- ---------------------------------------------------------------------------
 
 local function run_view(deps, basalt, installer, utf8display, log)
-  local tr = make_tr(installer)
+  -- Speak Chinese when the renderer can actually draw it: the installer ships a
+  -- CJK renderer for exactly this purpose, and a Chinese interface is what this
+  -- project's audience expects (the reference implementation's installer is
+  -- Chinese too).  When it cannot, the UI stays English rather than printing
+  -- glyphs the terminal cannot draw.
+  local prefer_chinese = chinese_renderable(utf8display)
+  local tr = make_tr(installer, prefer_chinese)
   local colors_table = read_global("colors") or {}
   local FG = colors_table.white or 1
   local BG = colors_table.black or 32768
@@ -458,11 +490,22 @@ local function run_view(deps, basalt, installer, utf8display, log)
   later_button:setVisible(false)
   later_button:setEnabled(false)
 
-  -- The autostart toggle.  It writes/removes a ROOT /startup.lua, which CC runs
-  -- at boot.  It is a SEPARATE control row (not a settings screen) and starts
-  -- OFF, so the installer never silently changes a machine's boot behaviour.
-  local autostart_button = frame:addButton({
-    x = 2, y = 17, width = "{parent.width-2}", height = 1,
+  -- THE AUTOSTART QUESTION, asked as two explicit answers.
+  --
+  -- It writes or removes a ROOT /startup.lua, which CC runs at boot.  A single
+  -- quiet toggle along the bottom did not read as a question: the requirement is
+  -- "whether to start at boot", a yes/no the user is meant to ANSWER, not a
+  -- setting they are meant to notice.  Two buttons put the question and the
+  -- current answer on screen at once, and the chosen answer is highlighted.
+  --
+  -- Neither is highlighted while the preference is unknown (state.autostart ==
+  -- nil), and in that state clicking Write changes NOTHING on disk.
+  local autostart_yes = frame:addButton({
+    x = left_x, y = 17, width = button_width, height = 3,
+    foreground = FG, background = PANEL,
+  })
+  local autostart_no = frame:addButton({
+    x = right_x, y = 17, width = button_width, height = 3,
     foreground = FG, background = PANEL,
   })
 
@@ -498,7 +541,15 @@ local function run_view(deps, basalt, installer, utf8display, log)
   elseif deps.autostart == false then
     initial_autostart = false
   else
-    initial_autostart = detect_autostart() == true
+    -- TRI-STATE: nil (could not read the disk) must stay nil, so an untouched
+    -- question changes nothing rather than deleting a startup file we failed to
+    -- recognise.
+    local detected = detect_autostart()
+    if detected == nil then
+      initial_autostart = nil
+    else
+      initial_autostart = detected
+    end
   end
 
   -- ------------------------------------------------------------- state -----
@@ -548,14 +599,20 @@ local function run_view(deps, basalt, installer, utf8display, log)
     progress:setProgress(math.floor(percent + 0.5))
   end
 
-  -- The toggle label is ASCII-safe either way, but goes through render_text so a
-  -- Chinese label renders like every other string.
-  local function render_autostart_button()
-    local state_word = state.autostart and tr("app.autostart.on")
-      or tr("app.autostart.off")
-    render_text(autostart_button,
-      tr("app.autostart.button", { state = state_word }),
-      FG_BLIT, PANEL_BLIT, utf8display)
+  -- Paint the two answers, highlighting the chosen one.  The button's own
+  -- background and the text's background are set TOGETHER, so a selected answer
+  -- is highlighted across the whole button rather than only behind the glyphs.
+  local function render_autostart()
+    local function paint(button, key, selected)
+      local bg_color = selected and ACCENT or PANEL
+      local bg_blit = selected and ACCENT_BLIT or PANEL_BLIT
+      pcall(function()
+        button:setBackground(bg_color)
+      end)
+      render_text(button, tr(key), FG_BLIT, bg_blit, utf8display)
+    end
+    paint(autostart_yes, "app.autostart.yes", state.autostart == true)
+    paint(autostart_no, "app.autostart.no", state.autostart == false)
   end
 
   -- ------------------------------------------------------------- http ------
@@ -745,7 +802,10 @@ local function run_view(deps, basalt, installer, utf8display, log)
     pcall(function()
       source_list:setEnabled(false)
     end)
-    autostart_button:setEnabled(false)
+    -- Once the install starts the answer is fixed, so both answers stop taking
+    -- input (the click handlers guard on state.started as well).
+    autostart_yes:setEnabled(false)
+    autostart_no:setEnabled(false)
     set_status(tr("app.preparing"))
     set_detail("")
     set_progress(0)
@@ -885,20 +945,25 @@ local function run_view(deps, basalt, installer, utf8display, log)
   end)
 
   -- --------------------------------------------------------- first paint ---
-  autostart_button:onClick(function()
+  autostart_yes:onClick(function()
     if state.started then
       return
     end
-    state.autostart = not state.autostart
-    render_autostart_button()
-    if state.autostart then
-      set_detail(tr("app.autostart.pending_on"))
-    else
-      set_detail(tr("app.autostart.pending_off"))
-    end
+    state.autostart = true
+    render_autostart()
+    set_detail(tr("app.autostart.pending_on"))
   end)
 
-  render_autostart_button()
+  autostart_no:onClick(function()
+    if state.started then
+      return
+    end
+    state.autostart = false
+    render_autostart()
+    set_detail(tr("app.autostart.pending_off"))
+  end)
+
+  render_autostart()
   set_source_title()
   set_status(tr("app.ready"))
   set_detail(tr("app.detail_ready"))
