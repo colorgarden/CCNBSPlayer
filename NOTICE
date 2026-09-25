@@ -26,13 +26,15 @@ Unlike the test fixtures, the following third-party source IS committed to this
 repository and IS distributed with it, under `vendor/`. It is vendored rather
 than fetched at runtime because Basalt's modules resolve each other through
 `require`, which does not work from a directory that is not on `package.path`.
-See `vendor/README.md` for how the bundle is built and reproduced.
+See `vendor/README.md` for the provenance and how to verify it.
 
 4. Basalt 2 - https://github.com/Pyroxenium/Basalt2
    Copyright (c) 2025 Pyroxenium
    Licensed under the MIT License. Full text: `vendor/LICENSE-Basalt2`.
-   Vendored as: `vendor/basalt.lua` (the "Full" single-file bundle, built from
-   upstream commit ba6c6911d2a317b452629faf77e55c7929857c73).
+   Vendored as: `vendor/basalt.lua` — the "Full" single-file bundle, verbatim from
+   upstream's published `release/basalt-full.lua` at commit
+   ba6c6911d2a317b452629faf77e55c7929857c73 (305,968 bytes, SHA256
+   4ce59622b7b4d5ec056a543859c91a080edd6cef5c64db8d9ddcfe0d0cf53859).
    Used for: the entire user interface framework.
 
 5. ComputerCraft-Utf8 (`utf8display`) - https://git.liulikeji.cn/xingluo/ComputerCraft-Utf8
