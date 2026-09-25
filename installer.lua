@@ -12,6 +12,21 @@
 -- afterwards.
 --
 -- ===========================================================================
+-- TWO MODES: INTERACTIVE (default) AND NON-INTERACTIVE (pinned)
+-- ===========================================================================
+-- On a real computer with HTTP enabled, running this file shows a plain-text
+-- SOURCE MENU (so the user PICKS the download source), downloads the Basalt +
+-- utf8display + ui/installer_app.lua bootstrap set, and then hands control to
+-- that Basalt view, which shows the GUI, a progress bar and the install
+-- buttons.  The whole install comes from the ONE chosen source.
+--
+-- When a source is pinned (`--mirror`, `--no-mirror`, an explicit base URL) or a
+-- headless result file is requested (`result=`), the installer NEVER prompts:
+-- that is the CI / acceptance-harness contract, and it keeps the original
+-- install(ioenv) path exactly as it was.  installer.should_prompt() is the
+-- single, tested decision point for this.
+--
+-- ===========================================================================
 -- THE INSTALL ROOT: /lib/ -- AND WHY IT IS THE RIGHT CHOICE
 -- ===========================================================================
 -- `require` has NO fixed `/lib/` search root.  On the target, package.path is
@@ -148,6 +163,11 @@ installer.MIRRORS = {
 -- How many times a single fetch is attempted before it is declared failed.
 installer.MAX_ATTEMPTS = 3
 
+-- Seconds a BOOTSTRAP request may wait before it is abandoned.  The bootstrap
+-- runs before Basalt exists, so it pumps events itself; this bound is what keeps
+-- selecting a source against a dead host from hanging.
+installer.BOOTSTRAP_TIMEOUT = 8
+
 -- Refuse to start when the install root has less than this many bytes free.
 -- The whole runtime is a few hundred KiB, so this is a coarse floor; the
 -- per-file check below is the precise guard.
@@ -155,6 +175,35 @@ installer.MIN_FREE_BYTES = 65536
 
 -- Keep this much headroom when checking a single file against free space.
 installer.SPACE_MARGIN = 2048
+
+-- ---------------------------------------------------------------------------
+-- Autostart at boot (a ROOT /startup.lua, which CC runs at boot)
+-- ---------------------------------------------------------------------------
+-- `rom/startup.lua` (the shell) runs `findStartups("/")` after the MOTD when the
+-- `shell.allow_startup` setting is on, and that resolves `/startup.lua` (or a
+-- `/startup/` directory) via shell.resolveProgram.  So the file MUST live at the
+-- root, exactly here.
+--
+-- The overriding rule is the SAFETY one: overwriting a user's existing
+-- /startup.lua would destroy unrelated machine configuration, which is far worse
+-- than not having autostart.  "ours" is therefore identified by a marker comment
+-- and a foreign file is NEVER touched -- see installer.autostart_decision.
+installer.AUTOSTART_PATH = "/startup.lua"
+
+-- The marker that identifies OUR startup file on a later run: an idempotent
+-- re-run can refresh it and "autostart off" can delete it, without ever touching
+-- a file someone else wrote.  Detection is a plain substring test.
+installer.AUTOSTART_MARKER = "CCNBSPlayer-autostart"
+
+-- The EXACT bytes written to /startup.lua.  The marker appears verbatim (it is
+-- what makes the overwrite/delete decision possible next run), and the fs.exists
+-- guard means a user who later deletes the player does not get a boot error.
+installer.AUTOSTART_BODY =
+  "-- CCNBSPlayer 开机自启动 —— 删除本文件即可关闭\n"
+  .. "-- 本文件由 CCNBSPlayer 安装器写入（" .. installer.AUTOSTART_MARKER .. "）\n"
+  .. "if fs.exists(\"/lib/ccnbsplayer\") or fs.exists(\"/lib/ccnbsplayer.lua\") then\n"
+  .. "  shell.run(\"/lib/ccnbsplayer\")\n"
+  .. "end\n"
 
 -- The FALLBACK file list, used only when the manifest cannot be fetched.  It is
 -- the exact set a running install needs -- the runtime modules the code
@@ -166,6 +215,8 @@ installer.RUNTIME_FILES = {
   "ccnbs.lua",
   "ccnbsplayer.lua",
   "updater.lua",
+  -- updater.lua does require("installer"), so it must be installed too.
+  "installer.lua",
   "nbs/analyze.lua",
   "nbs/cp1252.lua",
   "nbs/decode.lua",
@@ -191,6 +242,7 @@ installer.RUNTIME_FILES = {
   "ui/basalt_app.lua",
   "ui/cjk.lua",
   "ui/i18n.lua",
+  "ui/installer_app.lua",
   "ui/presenter.lua",
   "vendor/basalt.lua",
   "vendor/utf8display.lua",
@@ -251,6 +303,42 @@ local L10N = {
       "{name} did not answer; trying the next source.",
     ["installer.mirrors.title"] = "available sources (tried in this order):",
     ["installer.mirrors.entry"] = "  {index}. {name}  {base}",
+    ["installer.choose.title"] = "Choose a download source (everything comes from ONE source):",
+    ["installer.choose.auto"] = "  0. automatic - try each source in order",
+    ["installer.choose.entry"] = "  {index}. {name}  {base}",
+    ["installer.choose.prompt"] = "Enter a number (or a source name) [0 = automatic]: ",
+    ["installer.choose.invalid"] = "Not a valid choice. Enter 0-{count} or a source name.",
+    ["installer.choose.selected"] = "source: {name}  ({base})",
+    ["installer.choose.checking"] = "checking {name} ...",
+    ["installer.choose.reachable"] = "{name}: reachable.",
+    ["installer.choose.unreachable"] = "{name}: no response; trying the next source.",
+    ["installer.choose.no_input"] = "No interactive input available; using automatic mode.",
+    ["installer.choose.auto_selected"] =
+      "automatic mode: the first source that answers will be used.",
+    ["installer.bootstrap.loading"] =
+      "preparing the graphical installer from {base} ...",
+    ["installer.bootstrap.failed"] =
+      "could not prepare the graphical installer; falling back to the text installer.",
+    ["installer.autostart.write"] =
+      "autostart: wrote /startup.lua (the player starts automatically at boot).",
+    ["installer.autostart.overwrite"] =
+      "autostart: refreshed our /startup.lua.",
+    ["installer.autostart.delete"] =
+      "autostart: removed our /startup.lua.",
+    ["installer.autostart.skip-foreign"] =
+      "autostart: /startup.lua was written by someone else, so it was left "
+      .. "untouched. To enable autostart yourself, add this line to it: "
+      .. "shell.run(\"/lib/ccnbsplayer\")",
+    ["installer.autostart.none"] =
+      "autostart: nothing to do (/startup.lua does not exist).",
+    ["installer.autostart.no_fs"] =
+      "autostart: the filesystem is unavailable; /startup.lua was not changed.",
+    ["installer.autostart.failed"] =
+      "autostart: could not update /startup.lua.",
+    ["installer.usage.autostart"] =
+      "  - --autostart: write /startup.lua so the player starts at boot",
+    ["installer.usage.no_autostart"] =
+      "  - --no-autostart: remove our /startup.lua (never a foreign one); the default",
     ["installer.banner.source"] = "downloaded from: {name}  ({base})",
     ["installer.banner.title"] = "========== CCNBSPlayer install complete ==========",
     ["installer.banner.version"] =
@@ -313,6 +401,31 @@ local L10N = {
     ["installer.mirror_next"] = "{name} 无响应，尝试下一个来源。",
     ["installer.mirrors.title"] = "可用来源（按此顺序依次尝试）：",
     ["installer.mirrors.entry"] = "  {index}. {name}  {base}",
+    ["installer.choose.title"] = "请选择下载来源（整次安装只会用一个来源）：",
+    ["installer.choose.auto"] = "  0. 自动——按顺序依次尝试各来源",
+    ["installer.choose.entry"] = "  {index}. {name}  {base}",
+    ["installer.choose.prompt"] = "输入编号（或来源名称）[0 = 自动]：",
+    ["installer.choose.invalid"] = "无效选择，请输入 0-{count} 或来源名称。",
+    ["installer.choose.selected"] = "来源：{name}（{base}）",
+    ["installer.choose.checking"] = "正在检查 {name} ...",
+    ["installer.choose.reachable"] = "{name}：可用。",
+    ["installer.choose.unreachable"] = "{name}：无响应，尝试下一个来源。",
+    ["installer.choose.no_input"] = "当前无法交互输入，改用自动模式。",
+    ["installer.choose.auto_selected"] = "自动模式：将使用第一个能答上的来源。",
+    ["installer.bootstrap.loading"] = "正在从 {base} 准备图形安装程序……",
+    ["installer.bootstrap.failed"] = "无法准备图形安装程序，改用文本安装器。",
+    ["installer.autostart.write"] = "开机自启动：已写入 /startup.lua（开机自动运行播放器）。",
+    ["installer.autostart.overwrite"] = "开机自启动：已更新本安装器写入的 /startup.lua。",
+    ["installer.autostart.delete"] = "开机自启动：已删除本安装器写入的 /startup.lua。",
+    ["installer.autostart.skip-foreign"] =
+      "开机自启动：/startup.lua 是他人写入的，未做任何改动。若要自行启用，"
+      .. "请在文件中加入这一行：shell.run(\"/lib/ccnbsplayer\")",
+    ["installer.autostart.none"] = "开机自启动：无需处理（/startup.lua 不存在）。",
+    ["installer.autostart.no_fs"] = "开机自启动：文件系统不可用，未改动 /startup.lua。",
+    ["installer.autostart.failed"] = "开机自启动：无法更新 /startup.lua。",
+    ["installer.usage.autostart"] = "  · --autostart：写入 /startup.lua，让播放器开机自动启动",
+    ["installer.usage.no_autostart"] =
+      "  · --no-autostart：删除本安装器写入的 /startup.lua（绝不碰他人的）；默认行为",
     ["installer.banner.source"] = "下载来源：{name}（{base}）",
     ["installer.banner.title"] = "========== CCNBSPlayer 安装完成 ==========",
     ["installer.banner.version"] =
@@ -535,6 +648,23 @@ function installer.install_plan(base, files)
   return plan
 end
 
+-- installer.download_tasks(base, files) -> array of task tables, one per file.
+--
+-- A thin EXTENSION of installer.install_plan (never a re-implementation): it
+-- adds the 1-based `index` and the `total`, because the Basalt view must render
+-- `N/M <name>` while it walks the list ASYNCHRONOUSLY.  Building the task list
+-- in ONE place keeps the view from re-deriving URLs, targets or directories,
+-- which is exactly how the two install paths would silently drift apart.
+function installer.download_tasks(base, files)
+  local plan = installer.install_plan(base, files)
+  local total = #plan
+  for index = 1, total do
+    plan[index].index = index
+    plan[index].total = total
+  end
+  return plan
+end
+
 -- installer.should_overwrite(kind) -> "write" | "refuse".
 --   "dir"  -> refuse (never clobber a directory)
 --   "file" -> write (idempotent re-run; truncate + replace)
@@ -549,6 +679,58 @@ function installer.should_overwrite(kind)
   return "write"
 end
 
+-- installer.is_our_autostart(text) -> boolean.  PURE.  True only when the
+-- content carries our marker; nil/foreign content is NOT ours, which is exactly
+-- what makes "never clobber a stranger's startup file" enforceable.
+function installer.is_our_autostart(text)
+  if type(text) ~= "string" or text == "" then
+    return false
+  end
+  return text:find(installer.AUTOSTART_MARKER, 1, true) ~= nil
+end
+
+-- installer.autostart_decision(wants_autostart, exists, ours) ->
+--   "write" | "overwrite" | "delete" | "skip-foreign" | "none".
+--
+-- PURE: no I/O, never raises.  The SINGLE owner of the autostart policy -- the
+-- TUI and the non-interactive path both ask THIS, so they cannot disagree.
+--
+-- `wants_autostart` is TRI-STATE, and the distinction matters:
+--   true  = the user asked for autostart
+--   false = the user asked to turn it OFF
+--   nil   = the user expressed NO PREFERENCE -> "none", change nothing
+--
+-- nil is NOT the same as false.  Reading nil as "off" made a non-interactive run
+-- -- `/lib/updater`, say -- delete a /startup.lua the user had deliberately
+-- enabled, so every update silently switched off their setting.  An installer
+-- that was told nothing must assume nothing.
+--
+--   wants + no file          -> "write"
+--   wants + OUR file         -> "overwrite"    (idempotent re-run)
+--   wants + FOREIGN file     -> "skip-foreign" (NEVER clobber)
+--   no wants + OUR file      -> "delete"       (off is a clean way to disable)
+--   no wants + FOREIGN file  -> "skip-foreign" (NEVER touch)
+--   no wants + no file       -> "none"
+--   UNSET, anything at all   -> "none"         (leave the machine untouched)
+function installer.autostart_decision(wants_autostart, exists, ours)
+  if wants_autostart == nil then
+    return "none"
+  end
+  if exists ~= true then
+    if wants_autostart == true then
+      return "write"
+    end
+    return "none"
+  end
+  if ours ~= true then
+    return "skip-foreign"
+  end
+  if wants_autostart == true then
+    return "overwrite"
+  end
+  return "delete"
+end
+
 -- installer.parse_args(argv) -> { base, mirror, no_mirror, list_mirrors,
 --                                  result_path, help }.
 --   * an argument containing "://" is the repository base URL
@@ -556,6 +738,7 @@ end
 --   * `--no-mirror` restricts the install to the canonical GitHub address
 --   * `--list-mirrors` prints the sources and exits
 --   * `result=<path>` asks for a one-line harness result file
+--   * `--autostart` / `--no-autostart` set boot autostart explicitly
 --   * --help / -h / help prints usage
 -- Anything unrecognised is ignored.
 function installer.parse_args(argv)
@@ -566,6 +749,10 @@ function installer.parse_args(argv)
     list_mirrors = false,
     result_path = nil,
     help = false,
+    -- Tri-state: nil = UNSET (default OFF, never prompt on the non-interactive
+    -- path), true = --autostart, false = --no-autostart.  When both flags are
+    -- given the LAST one wins.
+    autostart = nil,
   }
   if type(argv) ~= "table" then
     return parsed
@@ -579,6 +766,10 @@ function installer.parse_args(argv)
         parsed.no_mirror = true
       elseif raw == "--list-mirrors" then
         parsed.list_mirrors = true
+      elseif raw == "--autostart" then
+        parsed.autostart = true
+      elseif raw == "--no-autostart" then
+        parsed.autostart = false
       elseif raw == "--mirror" then
         -- A separate token: the next argument is the name or URL.
         local value = argv[index + 1]
@@ -598,6 +789,33 @@ function installer.parse_args(argv)
     end
   end
   return parsed
+end
+
+-- installer.autostart_requested(parsed) -> true | false | nil.
+--
+-- TRI-STATE, deliberately.  `nil` means the command line carried no autostart
+-- flag: the user expressed NO PREFERENCE, and autostart_decision turns that into
+-- "change nothing".
+--
+-- nil is NOT "off".  Collapsing unset to `false` here is exactly what made a
+-- non-interactive run -- /lib/updater, for instance -- delete a /startup.lua the
+-- user had enabled, so every update silently switched their setting off.  "Do not
+-- enable by default" and "actively disable" are different instructions, and only
+-- an explicit --no-autostart means the second one.
+--
+-- (In the interactive TUI the toggle starts OFF and the user chooses explicitly,
+-- so that path passes a real boolean and is unaffected.)
+function installer.autostart_requested(parsed)
+  if type(parsed) ~= "table" then
+    return nil
+  end
+  if parsed.autostart == true then
+    return true
+  end
+  if parsed.autostart == false then
+    return false
+  end
+  return nil
 end
 
 -- installer.find_mirror(name) -> the MIRRORS entry with that name, or nil.
@@ -651,6 +869,110 @@ function installer.sources_for(parsed)
   return sources
 end
 
+-- installer.source_menu_lines(sources) -> array of strings.  PURE: it prints
+-- nothing and reads nothing.  The interactive bootstrap prints these lines, so
+-- the menu is a VALUE the tests can inspect rather than a side effect.
+function installer.source_menu_lines(sources)
+  if type(sources) ~= "table" or #sources == 0 then
+    sources = installer.MIRRORS
+  end
+  local lines = {}
+  lines[#lines + 1] = installer.tr("installer.choose.title")
+  lines[#lines + 1] = installer.tr("installer.choose.auto")
+  for index = 1, #sources do
+    local entry = sources[index]
+    lines[#lines + 1] = installer.tr("installer.choose.entry",
+      { index = index, name = entry.name, base = entry.base })
+  end
+  lines[#lines + 1] = installer.tr("installer.choose.prompt")
+  return lines
+end
+
+-- installer.parse_source_choice(text, count, names) -> 0 | 1..count | nil.
+-- PURE.  "" means automatic (0); a number in range selects that entry; a source
+-- NAME selects it case-insensitively; anything else is nil (the caller re-asks).
+-- `names` defaults to installer.MIRRORS so the common case needs two arguments.
+function installer.parse_source_choice(text, count, names)
+  count = tonumber(count) or 0
+  if type(text) ~= "string" then
+    return nil
+  end
+  local trimmed = text:gsub("^%s+", ""):gsub("%s+$", "")
+  if trimmed == "" then
+    return 0
+  end
+
+  local number = tonumber(trimmed)
+  if number ~= nil then
+    number = math.floor(number)
+    if number == 0 then
+      return 0
+    end
+    if number >= 1 and number <= count then
+      return number
+    end
+    return nil
+  end
+
+  if type(names) ~= "table" then
+    names = {}
+    for index = 1, #installer.MIRRORS do
+      names[index] = installer.MIRRORS[index].name
+    end
+  end
+  local wanted = trimmed:lower()
+  for index = 1, count do
+    local name = names[index]
+    if type(name) == "string" and name:lower() == wanted then
+      return index
+    end
+  end
+  return nil
+end
+
+-- installer.should_prompt(parsed, env) -> boolean.
+--
+-- The ONE place that decides whether the interactive menu runs.  A pinned base,
+-- --mirror, --no-mirror or a headless result= is a CONTRACT, not a hint: the
+-- installer must NOT prompt then, because CI has no keyboard.  Otherwise an
+-- explicit env.interactive override wins, and the default is to prompt only on a
+-- host that actually has HTTP and a way to read an answer.
+--
+-- It is deliberately pure: it inspects only `parsed` and `env`, so the whole
+-- decision is unit-testable with no computer and no terminal.
+function installer.should_prompt(parsed, env)
+  parsed = type(parsed) == "table" and parsed or {}
+  env = type(env) == "table" and env or {}
+
+  if type(parsed.base) == "string" and parsed.base ~= "" then
+    return false
+  end
+  if type(parsed.mirror) == "string" and parsed.mirror ~= "" then
+    return false
+  end
+  if parsed.no_mirror == true then
+    return false
+  end
+  if parsed.result_path ~= nil then
+    return false
+  end
+
+  if env.interactive == false then
+    return false
+  end
+  if env.interactive == true then
+    return true
+  end
+
+  if type(env.http) ~= "function" then
+    return false
+  end
+  if env.input ~= true then
+    return false
+  end
+  return true
+end
+
 -- A one-line rendering of a possibly multi-line message.
 function installer.one_line(text)
   return (tostring(text):gsub("[\r\n]+", " | "))
@@ -665,11 +987,17 @@ installer.INSTALL_DIRS = installer.install_dirs(installer.RUNTIME_FILES)
 -- Retry / space helpers (all seam-driven, never touching real globals)
 -- ---------------------------------------------------------------------------
 
--- installer.fetch_with_retry(http, url, log) -> body, last_error.  Calls the
--- injected `http(url)` up to MAX_ATTEMPTS times.  The FIRST non-nil body wins;
--- otherwise the last error is returned.  Pure apart from the injected `http`.
-function installer.fetch_with_retry(http, url, log)
-  local attempts = installer.MAX_ATTEMPTS
+-- installer.fetch_with_retry(http, url, log, attempts) -> body, last_error.  Calls
+-- the injected `http(url)` up to `attempts` times (defaulting to MAX_ATTEMPTS).
+-- The FIRST non-nil body wins; otherwise the last error is returned.  Pure apart
+-- from the injected `http`.  The optional `attempts` lets the BOOTSTRAP probe a
+-- list of sources with a SINGLE bounded attempt each, so a dead host cannot make
+-- the interactive menu appear to hang.
+function installer.fetch_with_retry(http, url, log, attempts)
+  attempts = tonumber(attempts) or installer.MAX_ATTEMPTS
+  if attempts < 1 then
+    attempts = 1
+  end
   local last_error = nil
   for attempt = 1, attempts do
     local body, err = http(url)
@@ -703,17 +1031,21 @@ function installer.load_files(http, base, log)
   return installer.RUNTIME_FILES, "fallback"
 end
 
--- installer.load_files_from(sources, http, log) -> files, source, used.
+-- installer.load_files_from(sources, http, log, attempts) -> files, source, used.
 --
 -- Walks `sources` IN ORDER and stops at the first one that yields a usable
 -- manifest.  `used` is the source that answered, so every later download comes
 -- from the SAME host -- an install is never assembled from a mixture of mirrors,
 -- which would otherwise be a way to get inconsistent file sets.
 --
+-- The optional `attempts` bounds how hard each source is tried (defaulting to
+-- MAX_ATTEMPTS).  install() keeps the default; the interactive bootstrap passes
+-- 1 so picking a source is a fast probe, not a long block.
+--
 -- `source` is "manifest" when a real manifest was read, or "fallback" when every
 -- source failed and the built-in list stands in; in the fallback case `used` is
 -- the FIRST source, because nothing answered and there is no better candidate.
-function installer.load_files_from(sources, http, log)
+function installer.load_files_from(sources, http, log, attempts)
   if type(sources) ~= "table" or #sources == 0 then
     sources = { { name = "github", base = installer.DEFAULT_BASE_URL } }
   end
@@ -725,7 +1057,7 @@ function installer.load_files_from(sources, http, log)
       { name = candidate.name, base = candidate.base }))
 
     local body = installer.fetch_with_retry(
-      http, installer.manifest_url(candidate.base), log)
+      http, installer.manifest_url(candidate.base), log, attempts)
     if type(body) == "string" then
       local parsed = installer.parse_manifest(body)
       if #parsed > 0 then
@@ -757,6 +1089,167 @@ function installer.free_space(fs, path)
     return value
   end
   return nil
+end
+
+-- installer.write_one(fs, entry, body, ctx) -> { ok = true }
+--                                          | { ok = false, code = <string>,
+--                                              message = <string> }
+--
+-- The SINGLE-FILE half of install(): it writes ONE already-downloaded body to
+-- its target.  Seam-driven (only the injected `fs` is touched) and it NEVER
+-- raises -- a broken injected seam comes back as a typed failure.  This is the
+-- writer the Basalt view calls, so the interactive path and the non-interactive
+-- path cannot disagree about the overwrite policy, the space guard or the
+-- wording of a refusal.
+--
+-- `entry` is a task from installer.install_plan / installer.download_tasks.
+-- `ctx` is { installed = <n>, total = <n>, log = <fn|nil> }; `installed` is how
+-- many files were already written, so a failure reports HONEST progress.
+function installer.write_one(fs, entry, body, ctx)
+  if type(fs) ~= "table" or type(entry) ~= "table" then
+    return { ok = false, code = "write-failed", message = "write-failed" }
+  end
+  ctx = type(ctx) == "table" and ctx or {}
+  local installed = tonumber(ctx.installed) or 0
+  local total = tonumber(ctx.total) or 1
+  local target = tostring(entry.target)
+
+  -- Whatever already occupies the target is classified here, and the OVERWRITE
+  -- POLICY is asked -- never re-implemented -- because installer.should_overwrite
+  -- is its single owner.
+  local existing_kind = "none"
+  if type(fs.exists) == "function" and fs.exists(target) then
+    if type(fs.is_dir) == "function" and fs.is_dir(target) then
+      existing_kind = "dir"
+    else
+      existing_kind = "file"
+    end
+  end
+  if installer.should_overwrite(existing_kind) == "refuse" then
+    return {
+      ok = false,
+      code = "dir-refused",
+      message = installer.tr("installer.dir_refused",
+        { target = target, installed = installed, total = total }),
+    }
+  end
+
+  -- The same precise per-file space check install() uses: never start a write
+  -- that cannot finish.  An unknown free space (nil) skips the check.
+  local free_here = installer.free_space(fs, entry.dir)
+  if free_here ~= nil and free_here < (#body + installer.SPACE_MARGIN) then
+    return {
+      ok = false,
+      code = "low-space",
+      message = installer.tr("installer.low_space_file", {
+        target = target,
+        needed = #body + installer.SPACE_MARGIN,
+        free = free_here,
+        installed = installed,
+        total = total,
+      }),
+    }
+  end
+
+  if type(fs.write) ~= "function" then
+    return {
+      ok = false,
+      code = "write-failed",
+      message = installer.tr("installer.write_failed",
+        { target = target, installed = installed, total = total }),
+    }
+  end
+  local wrote = fs.write(target, body)
+  if wrote ~= true then
+    return {
+      ok = false,
+      code = "write-failed",
+      message = installer.tr("installer.write_failed",
+        { target = target, installed = installed, total = total }),
+    }
+  end
+
+  if type(ctx.log) == "function" then
+    ctx.log(installer.tr("installer.installed_file", { path = target }))
+  end
+  return { ok = true }
+end
+
+-- installer.autostart_apply(fs, wants_autostart, ctx) -> { ok, code, message }.
+--
+-- The seam-driven action half of autostart: it reads whatever already sits at
+-- /startup.lua through the INJECTED adapter (installer.wrap_fs's surface, never
+-- a global), classifies it with is_our_autostart, asks autostart_decision, and
+-- performs the single action the decision names.  NEVER raises -- a broken seam
+-- comes back as a typed failure -- and NEVER touches a foreign file.
+--
+-- `code` is the decision ("write" / "overwrite" / "delete" / "skip-foreign" /
+-- "none"), or "no-fs" / "write-failed" when the seam cannot perform it.
+-- `message` is the localised sentence for the log / the TUI.
+function installer.autostart_apply(fs, wants_autostart, ctx)
+  ctx = type(ctx) == "table" and ctx or {}
+  if type(fs) ~= "table" or type(fs.exists) ~= "function" then
+    return {
+      ok = false,
+      code = "no-fs",
+      message = installer.tr("installer.autostart.no_fs"),
+    }
+  end
+
+  local path = installer.AUTOSTART_PATH
+
+  local exists = false
+  local ok_exists, value = pcall(fs.exists, path)
+  if ok_exists and value == true then
+    exists = true
+  end
+
+  local ours = false
+  if exists and type(fs.read) == "function" then
+    local ok_read, content = pcall(fs.read, path)
+    if ok_read and type(content) == "string" then
+      ours = installer.is_our_autostart(content)
+    end
+  end
+
+  -- Pass the preference through UNCHANGED.  Coercing it to a boolean here would
+  -- re-collapse "unset" into "off" and reintroduce the deleted-autostart bug.
+  local decision = installer.autostart_decision(wants_autostart,
+    exists, ours)
+
+  if decision == "write" or decision == "overwrite" then
+    local wrote = false
+    if type(fs.write) == "function" then
+      local ok_write, write_result = pcall(fs.write, path, installer.AUTOSTART_BODY)
+      wrote = ok_write and write_result == true
+    end
+    if not wrote then
+      return {
+        ok = false,
+        code = "write-failed",
+        message = installer.tr("installer.autostart.failed"),
+      }
+    end
+  elseif decision == "delete" then
+    local removed = false
+    if type(fs.delete) == "function" then
+      local ok_delete, delete_result = pcall(fs.delete, path)
+      removed = ok_delete and delete_result == true
+    end
+    if not removed then
+      return {
+        ok = false,
+        code = "write-failed",
+        message = installer.tr("installer.autostart.failed"),
+      }
+    end
+  end
+
+  return {
+    ok = true,
+    code = decision,
+    message = installer.tr("installer.autostart." .. decision),
+  }
 end
 
 -- ---------------------------------------------------------------------------
@@ -814,6 +1307,39 @@ function installer.wrap_fs(real_fs)
       return value
     end
     return nil
+  end
+
+  -- read() is used by the autostart decision to tell OUR /startup.lua from a
+  -- stranger's.  Returns the file body, or nil when it cannot be read (which the
+  -- caller treats as "not ours", the safe default).
+  function adapter.read(path)
+    local handle = nil
+    local ok = pcall(function()
+      handle = real_fs.open(path, "r")
+    end)
+    if not ok or handle == nil then
+      return nil
+    end
+    local data = nil
+    local read_ok = pcall(function()
+      data = handle.readAll()
+      handle.close()
+    end)
+    if not read_ok or type(data) ~= "string" then
+      return nil
+    end
+    return data
+  end
+
+  -- delete() is used only to remove OUR OWN /startup.lua.  A nil/false return is
+  -- re-checked against exists(), so a host that reports success differently still
+  -- gives an honest answer.
+  function adapter.delete(path)
+    local ok, value = pcall(real_fs.delete, path)
+    if ok and value == true then
+      return true
+    end
+    return not adapter.exists(path)
   end
 
   return adapter
@@ -956,32 +1482,19 @@ function installer.install(ioenv)
       }
     end
 
-    -- Precise per-file space check: never start a write that cannot finish.
-    local free_here = installer.free_space(fs, entry.dir)
-    if free_here ~= nil and free_here < (#body + installer.SPACE_MARGIN) then
+    -- The space guard and the write itself are shared with the interactive view
+    -- through installer.write_one, so both paths refuse and space-check the same
+    -- way and can never drift apart.
+    local wrote = installer.write_one(fs, entry, body, {
+      installed = #written,
+      total = total,
+      log = log,
+    })
+    if not wrote.ok then
       return {
         ok = false,
-        code = "low-space",
-        message = installer.tr("installer.low_space_file", {
-          target = entry.target,
-          needed = #body + installer.SPACE_MARGIN,
-          free = free_here,
-          installed = #written,
-          total = total,
-        }),
-        installed = #written,
-        total = total,
-        failed_path = entry.repo_path,
-      }
-    end
-
-    local ok = fs.write(entry.target, body)
-    if not ok then
-      return {
-        ok = false,
-        code = "write-failed",
-        message = installer.tr("installer.write_failed",
-          { target = entry.target, installed = #written, total = total }),
+        code = wrote.code,
+        message = wrote.message,
         installed = #written,
         total = total,
         failed_path = entry.repo_path,
@@ -989,7 +1502,6 @@ function installer.install(ioenv)
     end
 
     written[#written + 1] = entry.target
-    log(installer.tr("installer.installed_file", { path = entry.target }))
   end
 
   return {
@@ -1100,6 +1612,8 @@ function installer.print_usage(env)
   log(installer.tr("installer.usage.mirror", { names = installer.mirror_names() }))
   log(installer.tr("installer.usage.no_mirror"))
   log(installer.tr("installer.usage.list_mirrors"))
+  log(installer.tr("installer.usage.autostart"))
+  log(installer.tr("installer.usage.no_autostart"))
   log(installer.tr("installer.usage.result"))
   log(installer.tr("installer.usage.location", { root = installer.INSTALL_ROOT }))
 end
@@ -1123,6 +1637,266 @@ function installer.write_result(env, path, result)
   end
   local ok = pcall(env.fs.write, path, line .. "\n")
   return ok and true or false
+end
+
+-- ---------------------------------------------------------------------------
+-- The interactive bootstrap: menu, bounded fetch, and the hand-off to the GUI
+-- ---------------------------------------------------------------------------
+-- `wget run <url>/installer.lua` puts ONLY installer.lua on the machine, so the
+-- GUI cannot be `require`d -- it does not exist yet.  This phase therefore:
+--
+--   1. shows the SOURCE MENU in plain text and reads a choice (no network call
+--      happens before the answer, so the menu itself can never hang),
+--   2. resolves a manifest from the chosen source with a SINGLE bounded attempt
+--      per source, so the whole install then comes from ONE host,
+--   3. downloads the three bootstrap files (Basalt, utf8display, the view) and
+--      load()s them,
+--   4. hands control to ui/installer_app.lua.
+--
+-- Every step is guarded: if the GUI cannot be brought up, run_interactive()
+-- returns nil and main() falls back to the plain-text installer, so a failed GUI
+-- costs the user a GUI, never an install.
+
+-- installer.read_seam(env) -> function() -> string | nil.  The read() seam: an
+-- injected env.read wins, else the program's own `read` global, else _G.read.
+-- (CC:Tweaked's basic globals such as read/sleep live in the program
+-- environment; the bare reference finds them there, and rawget is a backstop.)
+function installer.read_seam(env)
+  if type(env) == "table" and type(env.read) == "function" then
+    return env.read
+  end
+  local from_environment = read
+  if type(from_environment) == "function" then
+    return from_environment
+  end
+  local from_global = rawget(_G, "read")
+  if type(from_global) == "function" then
+    return from_global
+  end
+  return nil
+end
+
+-- installer.has_input(env) -> boolean.  True only when there is a way to read an
+-- answer.  should_prompt() consumes this through env.input.
+function installer.has_input(env)
+  return installer.read_seam(env) ~= nil
+end
+
+-- installer.bootstrap_fetch(env) -> fetch | nil.  A ONE-ATTEMPT fetch function
+-- (function(url) -> body, err) built on the ASYNCHRONOUS http.request plus an
+-- os.startTimer watchdog.  Used only before Basalt exists.  Returns nil when the
+-- raw HTTP API is unavailable, which makes main() use the plain path.
+function installer.bootstrap_fetch(env)
+  local http_api = rawget(_G, "http")
+  local oslib = rawget(_G, "os")
+  if type(http_api) ~= "table" or type(http_api.request) ~= "function" then
+    return nil
+  end
+  if type(oslib) ~= "table"
+    or type(oslib.pullEvent) ~= "function"
+    or type(oslib.startTimer) ~= "function" then
+    return nil
+  end
+
+  local timeout = installer.BOOTSTRAP_TIMEOUT
+  if type(env) == "table" then
+    timeout = tonumber(env.bootstrap_timeout) or timeout
+  end
+
+  return function(url)
+    if type(url) ~= "string" or url == "" then
+      return nil, "empty url"
+    end
+
+    local request_url = url
+    if request_url:find("?", 1, true) ~= nil then
+      request_url = request_url .. "&CCNBSBootstrap=1"
+    else
+      request_url = request_url .. "?CCNBSBootstrap=1"
+    end
+
+    local ok, accepted, request_error = pcall(http_api.request, {
+      url = request_url,
+      method = "GET",
+      headers = { ["User-Agent"] = "CCNBSPlayer-Installer/1.0" },
+      timeout = timeout,
+    })
+    if not ok or accepted == false then
+      return nil, tostring(request_error or "http request rejected")
+    end
+
+    local timer = oslib.startTimer(timeout)
+    while true do
+      local event, first, second = oslib.pullEvent()
+      if event == "http_success" and first == request_url then
+        local read_ok, body = pcall(function()
+          return second.readAll()
+        end)
+        pcall(function()
+          second.close()
+        end)
+        if read_ok and type(body) == "string" then
+          return body
+        end
+        return nil, "response unreadable"
+      elseif event == "http_failure" and first == request_url then
+        return nil, tostring(second or "network failure")
+      elseif event == "timer" and first == timer then
+        return nil, "timed out"
+      end
+    end
+  end
+end
+
+-- installer.load_source(compile, source, name) -> value | nil.  Compiles and
+-- RUNS a fetched source chunk in the global environment (the bootstrap bundles
+-- expect that).  Returns nil -- never raises -- on a compile or runtime error,
+-- which sends the caller down the plain-text fallback.
+function installer.load_source(compile, source, name)
+  if type(compile) ~= "function" or type(source) ~= "string" then
+    return nil
+  end
+  local chunk = compile(source, name, "t", _G)
+  if chunk == nil then
+    return nil
+  end
+  local ok, value = pcall(chunk)
+  if ok then
+    return value
+  end
+  return nil
+end
+
+-- installer.choose_source(env, sources) -> sources', automatic.
+-- Prints the menu (installer.source_menu_lines) and reads an answer through the
+-- read seam until it is valid; an empty answer means automatic.  A pinned choice
+-- returns a ONE-element list, so every later download is forced through it.
+function installer.choose_source(env, sources)
+  if type(sources) ~= "table" or #sources == 0 then
+    sources = installer.MIRRORS
+  end
+  local log = function() end
+  if type(env) == "table" and type(env.log) == "function" then
+    log = env.log
+  end
+  local reader = installer.read_seam(env)
+  if reader == nil then
+    log(installer.tr("installer.choose.no_input"))
+    return sources, true
+  end
+
+  local lines = installer.source_menu_lines(sources)
+  for index = 1, #lines do
+    log(lines[index])
+  end
+  local names = {}
+  for index = 1, #sources do
+    names[index] = sources[index].name
+  end
+  for _ = 1, 20 do
+    local answer = reader()
+    local choice = installer.parse_source_choice(answer, #sources, names)
+    if choice == 0 then
+      return sources, true
+    end
+    if choice ~= nil then
+      return { sources[choice] }, false
+    end
+    log(installer.tr("installer.choose.invalid", { count = #sources }))
+  end
+  return sources, true
+end
+
+-- installer.run_interactive(parsed, env) -> result | nil.
+-- The whole bootstrap.  Returns nil when the GUI cannot be prepared (no raw
+-- HTTP, no load, a failed download, a failed compile), and main() then runs the
+-- plain-text installer instead.
+function installer.run_interactive(parsed, env)
+  env = type(env) == "table" and env or {}
+  local log = type(env.log) == "function" and env.log or function() end
+
+  local sources = env.sources
+  if type(sources) ~= "table" or #sources == 0 then
+    sources = installer.sources_for(parsed)
+  end
+
+  local fetch = installer.bootstrap_fetch(env)
+  if fetch == nil then
+    return nil
+  end
+
+  local chosen, automatic = installer.choose_source(env, sources)
+  if automatic then
+    log(installer.tr("installer.choose.auto_selected"))
+  end
+
+  -- One bounded attempt per source here; the source that answers is then used
+  -- for EVERY download, so an install is never assembled from two hosts.
+  local files, source_kind, used = installer.load_files_from(chosen, fetch, log, 1)
+  if type(files) ~= "table" or type(used) ~= "table"
+    or type(used.base) ~= "string" then
+    return nil
+  end
+  local origin = installer.normalize_base(used.base)
+  log(installer.tr("installer.choose.selected",
+    { name = used.name, base = origin }))
+
+  local compile = rawget(_G, "load")
+  if type(compile) ~= "function" then
+    return nil
+  end
+
+  log(installer.tr("installer.bootstrap.loading", { base = origin }))
+  local basalt_body = installer.fetch_with_retry(fetch,
+    installer.file_url(origin, "vendor/basalt.lua"), log, 1)
+  local utf8_body = installer.fetch_with_retry(fetch,
+    installer.file_url(origin, "vendor/utf8display.lua"), log, 1)
+  local app_body = installer.fetch_with_retry(fetch,
+    installer.file_url(origin, "ui/installer_app.lua"), log, 1)
+  if type(basalt_body) ~= "string" or type(utf8_body) ~= "string"
+    or type(app_body) ~= "string" then
+    log(installer.tr("installer.bootstrap.failed"))
+    return nil
+  end
+
+  local basalt = installer.load_source(compile, basalt_body, "=basalt")
+  local utf8display = installer.load_source(compile, utf8_body, "=utf8display")
+  local app = installer.load_source(compile, app_body, "=installer_app")
+  if type(basalt) ~= "table" or type(app) ~= "table"
+    or type(app.run) ~= "function" then
+    log(installer.tr("installer.bootstrap.failed"))
+    return nil
+  end
+
+  local result = app.run({
+    basalt = basalt,
+    utf8display = utf8display,
+    installer = installer,
+    sources = chosen,
+    base = origin,
+    files = files,
+    -- Pass the TRI-STATE through: true/false is an explicit command-line choice,
+    -- nil means the user said nothing and the TUI must fall back to the disk state
+    -- rather than assume OFF.  (Collapsing nil to false here is what made the GUI
+    -- delete an autostart the user had enabled, merely because they re-ran the
+    -- installer and left the toggle alone.)
+    autostart = parsed.autostart,
+    log = log,
+  })
+
+  local exit_code = 0
+  if type(result) == "table" and type(result.exit_code) == "number" then
+    exit_code = result.exit_code
+  end
+  return {
+    ok = true,
+    code = "tui",
+    installed = #files,
+    total = #files,
+    source = source_kind,
+    base = origin,
+    exit_code = exit_code,
+  }
 end
 
 -- ---------------------------------------------------------------------------
@@ -1150,11 +1924,29 @@ function installer.main(argv, ioenv)
     return { ok = true, code = "list-mirrors", installed = 0, total = 0 }
   end
 
-  -- Which sources may be used, in what order.  install() honours ioenv.base as
-  -- the older single-base contract, so sources_for() is only consulted when no
-  -- explicit base was given.
+  -- Which sources may be used, and in what order.  install() honours ioenv.base
+  -- as the older single-base contract, so sources_for() is only consulted when
+  -- no explicit base was given.
   env.sources = installer.sources_for(parsed)
   env.base = parsed.base
+
+  -- INTERACTIVE DEFAULT: on a real computer with HTTP and a keyboard, show the
+  -- source menu and the Basalt GUI.  should_prompt() is the SINGLE decision, so
+  -- a pinned --mirror / --no-mirror / base / result= (CI, the headless harness)
+  -- still runs the plain path with NO prompt.
+  env.input = installer.has_input(env)
+  if installer.should_prompt(parsed, env) then
+    local tui = installer.run_interactive(parsed, env)
+    if tui ~= nil then
+      if parsed.result_path ~= nil then
+        installer.write_result(env, parsed.result_path, tui)
+      end
+      return tui
+    end
+    -- The GUI could not be prepared: fall through to the plain-text installer so
+    -- a failed GUI never leaves the user with nothing.
+  end
+
   local result = installer.install(env)
 
   if parsed.result_path ~= nil then
@@ -1162,6 +1954,18 @@ function installer.main(argv, ioenv)
   end
 
   if result.ok then
+    -- Autostart is applied HERE only on the NON-INTERACTIVE path: the interactive
+    -- TUI owns it (its toggle), and this branch is reached only when the GUI was
+    -- skipped or could not start.  An unset flag means "no preference", so nothing
+    -- on disk is changed -- a run that was told nothing must not disable a
+    -- /startup.lua the user enabled earlier.  Only an explicit --no-autostart
+    -- removes OUR file, and a foreign /startup.lua is never touched either way.
+    local auto = installer.autostart_apply(env.fs,
+      installer.autostart_requested(parsed), { log = env.log })
+    if type(env.log) == "function" and auto.message ~= nil
+      and auto.code ~= "none" then
+      env.log(auto.message)
+    end
     pcall(installer.print_banner, env, result)
     return result
   end

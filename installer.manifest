@@ -12,9 +12,13 @@
 # does not exist. Runtime modules only: no tests/**, no scripts.
 
 # Entry programs (must sit beside the modules under /lib so require resolves).
+# installer.lua is shipped because the updater requires it: /lib/updater does
+# `require("installer")`, so a fresh install MUST write /lib/installer.lua or the
+# command the README tells users to run dies on `module 'installer' not found`.
 ccnbs.lua
 ccnbsplayer.lua
 updater.lua
+installer.lua
 
 # NBS decode/analyze modules.
 nbs/analyze.lua
@@ -44,10 +48,12 @@ net/http.lua
 net/nbw.lua
 net/zip.lua
 
-# UI layer: the Basalt app entry point, the i18n tables and the presentation logic.
+# UI layer: the Basalt app entry point, the i18n tables, the installer's Basalt
+# view and the presentation logic.
 ui/basalt_app.lua
 ui/cjk.lua
 ui/i18n.lua
+ui/installer_app.lua
 ui/presenter.lua
 
 # Vendored third-party bundles the runtime loads (see vendor/README.md).
