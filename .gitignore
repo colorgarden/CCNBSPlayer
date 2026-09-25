@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Planning / agent artifacts - MUST NEVER be published.
+# .omo/ holds ulw-plan drafts, the work plan and evidence.
+# .codegraph/ holds a machine-local code index (its own .gitignore also guards
+# the database, but we exclude the whole tool directory from the public repo).
+# ---------------------------------------------------------------------------
+.omo/
+.codegraph/
+
+# ---------------------------------------------------------------------------
+# CraftOS-PC scratch data (headless test runs use --directory <fresh-tmp>).
+# ---------------------------------------------------------------------------
+craftos-data/
+craftos-pc/
+*.craftos/
+**/computer/*/disk/
+
+# ---------------------------------------------------------------------------
+# Python (fixture generation / audio cross-check tooling: pynbs, nbswave).
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# ---------------------------------------------------------------------------
+# Lua test / tool scratch output.
+# ---------------------------------------------------------------------------
+*.tmp
+tests/.tmp/
+
+# ---------------------------------------------------------------------------
+# OS / editor cruft.
+# ---------------------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

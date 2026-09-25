@@ -1,0 +1,44 @@
+NOTICE
+======
+
+CCNBSPlayer
+Copyright (c) 2026 colorgarden
+Licensed under the MIT License (see LICENSE).
+
+This project is an independent, from-scratch implementation. It is not
+affiliated with, endorsed by, or sponsored by Open Note Block Studio,
+Mojang, Microsoft, or the CC:Tweaked maintainers.
+
+
+Third-party components
+----------------------
+The test suite is designed to vendor a small number of .nbs fixtures from
+permissively licensed open-source projects in order to verify the decoder
+against known-good input. When those fixtures are added, the following
+attributions apply and must be retained in this file.
+
+1. pynbs - https://github.com/OpenNBS/pynbs
+   Copyright (c) Open Note Block Studio contributors
+   Licensed under the MIT License.
+   Used for: .nbs test fixtures (tests/resources/*.nbs) and their committed
+   parsed-output golden snapshots (tests/snapshots/*.txt), as well as the
+   minimal legacy/current song goldens.
+
+2. nbs.js - https://github.com/OpenNBS/nbs.js
+   Copyright (c) Open Note Block Studio contributors
+   Licensed under the MIT License.
+   Used for: the version 6 test fixture (tests/accuracy/samples/simple.nbs)
+   and its documented expected values.
+
+3. Open Note Block Studio - https://github.com/OpenNBS/NoteBlockStudio
+   Copyright (c) Open Note Block Studio contributors
+   Licensed under the MIT License.
+   Used for: the upstream demo songs that the above fixtures are derived from.
+
+
+Trademarks
+----------
+"Minecraft" is a trademark of Mojang Synergies AB. "ComputerCraft" and
+"CC:Tweaked" refer to their respective projects and maintainers. All
+trademarks remain the property of their owners. Reference to them is
+descriptive only.
