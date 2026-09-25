@@ -1,0 +1,15 @@
+# Normalise line endings in the repository to LF.
+# CC:Tweaked runs Lua on a Linux-like VM and the installer is fetched over
+# HTTP; CRLF in Lua sources is undesirable, so keep the repository LF-only.
+* text=auto eol=lf
+
+# Binary fixtures and assets must never be line-ending converted.
+*.nbs binary
+*.dfpwm binary
+*.ogg binary
+*.wav binary
+
+# Windows-only helper scripts keep native CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
