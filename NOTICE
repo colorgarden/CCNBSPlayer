@@ -6,17 +6,84 @@ Copyright (c) 2026 colorgarden
 This project's own code is licensed under the GNU General Public License,
 version 2 (GPL-2.0, not "or later"). See LICENSE.
 
-The third-party `.nbs` test fixtures listed under "Third-party components"
-below are separate works; they are NOT covered by this project's GPL-2.0
-license and remain under their own licenses as stated there.
+The third-party components listed under "Vendored components" and
+"Third-party components" below are separate works. Where a component carries its
+own license, that license governs it and is stated here; this project's GPL-2.0
+does not replace it. The `.nbs` test fixtures are NOT covered by this project's
+GPL-2.0 at all and remain under their own licenses as stated below.
 
-This project is an independent, from-scratch implementation. It is not
-affiliated with, endorsed by, or sponsored by Open Note Block Studio,
-Mojang, Microsoft, or the CC:Tweaked maintainers.
+This project is an independent implementation. Its architecture and its approach
+to rendering Chinese on a CC:Tweaked terminal were modelled on the MPlayer
+project (credited below); no MPlayer source was copied into this repository. This
+project is not affiliated with, endorsed by, or sponsored by Open Note Block
+Studio, Mojang, Microsoft, the CC:Tweaked maintainers, the Basalt maintainers, or
+the authors of MPlayer.
 
 
-Third-party components
+Vendored components (committed to this repository)
+--------------------------------------------------
+Unlike the test fixtures, the following third-party source IS committed to this
+repository and IS distributed with it, under `vendor/`. It is vendored rather
+than fetched at runtime because Basalt's modules resolve each other through
+`require`, which does not work from a directory that is not on `package.path`.
+See `vendor/README.md` for how the bundle is built and reproduced.
+
+4. Basalt 2 - https://github.com/Pyroxenium/Basalt2
+   Copyright (c) 2025 Pyroxenium
+   Licensed under the MIT License. Full text: `vendor/LICENSE-Basalt2`.
+   Vendored as: `vendor/basalt.lua` (the "Full" single-file bundle, built from
+   upstream commit ba6c6911d2a317b452629faf77e55c7929857c73).
+   Used for: the entire user interface framework.
+
+5. ComputerCraft-Utf8 (`utf8display`) - https://git.liulikeji.cn/xingluo/ComputerCraft-Utf8
+   Copyright (c) the ComputerCraft-Utf8 author (xingluo / HKXingluo)
+   LICENSING POSITION - PLEASE READ: this component declares NO LICENSE of its
+   own. Its repository contains no LICENSE, COPYING or NOTICE file, and its
+   source carries no license header, no copyright line and no SPDX identifier.
+   It is redistributed here on the basis of PROVENANCE, not of a license file:
+   the same author also publishes MPlayer (GPL-2.0), and MPlayer distributes this
+   file as part of its own GPL-2.0 work. This project therefore receives it from
+   its own copyright holder under GPL-2.0, which is the same license this project
+   already uses. It carries no separate license of its own and none is claimed
+   here. If you are the author and want this handled differently, please make
+   contact so it can be corrected.
+   Vendored as: `vendor/utf8display.lua`.
+   Used for: drawing CJK glyphs as bitmaps, because a stock CC:Tweaked terminal
+   has no CJK font.
+
+
+Third-party components (NOT committed; obtained at runtime)
+-----------------------------------------------------------
+6. Fusion Pixel Font - https://github.com/TakWolf/fusion-pixel-font
+   Copyright (c) TakWolf
+   Licensed under the MIT License.
+   NOT distributed with this repository. The font is downloaded onto the user's
+   own computer at runtime by `ui/cjk.lua`, because the 8px font is 1,681,325
+   bytes and a default CC:Tweaked computer's disk limit is 1,000,000 bytes, so
+   the font cannot be stored alongside the program on a default server. This is
+   the same approach MPlayer takes.
+
+7. MPlayer - https://git.liulikeji.cn/xingluo/MPlayer
+   Copyright (c) the MPlayer author (xingluo / HKXingluo)
+   Licensed under the GNU General Public License version 2 (GPL-2.0); the
+   repository's LICENSE file is the GPL-2.0 text and its README states the
+   license explicitly.
+   NOT distributed with this repository and no source copied from it. Credited
+   because (a) this project's UI architecture and its Chinese-rendering approach
+   follow MPlayer's, and (b) MPlayer is the GPL-2.0 work through which
+   `utf8display` (item 5 above) reaches this project.
+
+
+The project's own code
 ----------------------
+Everything this project wrote itself is under GPL-2.0: `nbs/`, `player/`, `ui/`
+(except for the vendored files it loads), `net/`, `installer.lua`, `ccnbs.lua`,
+`ccnbsplayer.lua` and `qa/`. The only third-party source in the distributed
+player is the `vendor/` directory described above.
+
+
+Test fixtures (NOT distributed with this repository)
+----------------------------------------------------
 The local test suite uses a small number of .nbs fixtures from permissively
 licensed open-source projects in order to verify the decoder against known-good
 input. Those fixtures are NOT distributed with this repository, but the
@@ -24,25 +91,21 @@ attributions are retained here because the project depends on them during
 development, and because anyone who obtains the test suite separately should see
 where its input came from.
 
-1. pynbs - https://github.com/OpenNBS/pynbs
+8. pynbs - https://github.com/OpenNBS/pynbs
    Copyright (c) Open Note Block Studio contributors
    Licensed under the MIT License.
    Used for: .nbs test fixtures and their parsed-output golden snapshots, as
    well as the minimal legacy/current song goldens.
 
-2. nbs.js - https://github.com/OpenNBS/nbs.js
+9. nbs.js - https://github.com/OpenNBS/nbs.js
    Copyright (c) Open Note Block Studio contributors
    Licensed under the MIT License.
    Used for: the version 6 test fixture and its documented expected values.
 
-3. Open Note Block Studio - https://github.com/OpenNBS/NoteBlockStudio
-   Copyright (c) Open Note Block Studio contributors
-   Licensed under the MIT License.
-   Used for: the upstream demo songs that the above fixtures are derived from.
-
-The distributed player itself contains NO third-party code: `nbs/`, `player/`,
-`ccnbs.lua`, `ccnbsplayer.lua`, `installer.lua` and `qa/` are written from
-scratch for this project.
+10. Open Note Block Studio - https://github.com/OpenNBS/NoteBlockStudio
+    Copyright (c) Open Note Block Studio contributors
+    Licensed under the MIT License.
+    Used for: the upstream demo songs that the above fixtures are derived from.
 
 
 Trademarks
