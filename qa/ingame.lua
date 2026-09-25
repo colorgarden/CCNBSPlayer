@@ -1,5 +1,29 @@
 -- qa/ingame.lua
 --
+-- LANGUAGE
+-- ---------------------------------------------------------------------------
+-- The DEFAULT here is English because a stock CC:Tweaked terminal ships NO CJK
+-- font, so Chinese prose renders as garbage on screen.  Chinese is used only
+-- when the runtime-fetched pixel-font renderer is available: the ACTIVE code is
+-- read from ui/i18n.lua, the SINGLE source of user-facing prose, so this probe
+-- follows the shared language switch instead of hard-coding "en".
+--
+-- ui/i18n.lua's public interface has NO way to register extra keys (it exposes
+-- only DEFAULT_LANGUAGE / languages / set_language / get_language / t / has /
+-- missing_keys / translations), so this probe keeps its own sentences in the
+-- local L10N table below -- one entry per language -- while still asking
+-- i18n.get_language() which language is active.  A computer without ui/i18n.lua
+-- (or without the renderer) simply stays in English.
+--
+-- THE `INGAME ...` SUMMARY IS A MACHINE PROTOCOL -- NEVER TRANSLATE IT.
+-- Its keys (version= / speakers= / file= / song= / warn= / warncode= /
+-- status=), its STATUS VALUES (ok / no-speaker / missing-file / decode-failed)
+-- and the --harness and --result= flags stay byte-identical ASCII, because a
+-- headless harness greps them.  The `WARN[<code>]` prefix on an `INGAME warn=`
+-- line is protocol too; player/warnings.lua already localises only the human
+-- sentence after it.  Only the human-readable sentences around the protocol are
+-- translated here.
+--
 -- IN-GAME ACCEPTANCE SCRIPT -- paste this (or copy it to the computer) and run
 -- it ON A REAL CC:Tweaked COMPUTER to sanity-check the player end to end,
 -- including on real hardware, where the emulator's pitch restriction does NOT
@@ -52,6 +76,102 @@
 do
   local prefix = "/lib/"
   package.path = prefix .. "?.lua;" .. prefix .. "?/init.lua;" .. package.path
+end
+
+-- ---------------------------------------------------------------------------
+-- Language -- route through the shared i18n layer
+-- ---------------------------------------------------------------------------
+-- ui/i18n.lua owns the ACTIVE language but offers NO key-registration API, so
+-- this probe holds its own human-readable sentences in L10N below (one entry
+-- per language) and asks i18n.get_language() which one to use.  The require is
+-- guarded: a computer where ui/i18n.lua is absent (or the renderer is not
+-- loaded) still runs, in English.
+local i18n = nil
+do
+  local ok_module, module = pcall(require, "ui.i18n")
+  if ok_module and type(module) == "table"
+    and type(module.get_language) == "function" then
+    i18n = module
+  end
+end
+
+local DEFAULT_LANGUAGE = "en"
+
+-- Every sentence this probe prints.  The `INGAME ...` lines are NOT here: they
+-- are machine protocol and are emitted byte-identically elsewhere.
+local L10N = {
+  en = {
+    ["ingame.no_library"] =
+      "ccnbs module not found. Run the installer (installer.lua) first.",
+    ["ingame.speakers"] = "Speakers detected: {count}.",
+    ["ingame.no_speaker.a"] =
+      "No speaker peripheral detected: attach a speaker to one side of the",
+    ["ingame.no_speaker.b"] =
+      "computer (e.g. back/left/right) so `peripheral.getNames()` lists it, then retry.",
+    ["ingame.prompt"] = "Enter the path to a .nbs file (e.g. /songs/mysong.nbs): ",
+    ["ingame.missing_argument"] =
+      "No song path given. Usage: ingame.lua [--harness] [--result=FILE] <song.nbs>",
+    ["ingame.missing_file"] = "Cannot find or read file: {path}",
+    ["ingame.decode_failed"] = "Decode failed, error code: {code}",
+    ["ingame.play_failed"] = "Playback failed: {error}",
+    ["ingame.complete"] = "Acceptance probe complete.",
+  },
+  zh = {
+    ["ingame.no_library"] =
+      "未找到 ccnbs 模块。请先运行安装器（installer.lua）完成安装。",
+    ["ingame.speakers"] = "检测到扬声器：{count} 个。",
+    ["ingame.no_speaker.a"] =
+      "未检测到扬声器外设：请把扬声器贴在电脑的某一侧（如 back/left/right），",
+    ["ingame.no_speaker.b"] =
+      "用 `peripheral.getNames()` 能看到它之后再重试。",
+    ["ingame.prompt"] = "请输入 .nbs 文件路径（例如 /songs/mysong.nbs）：",
+    ["ingame.missing_argument"] =
+      "未提供歌曲路径。用法：ingame.lua [--harness] [--result=文件] <歌曲.nbs>",
+    ["ingame.missing_file"] = "找不到或无法读取文件：{path}",
+    ["ingame.decode_failed"] = "解码失败，错误码：{code}",
+    ["ingame.play_failed"] = "播放失败：{error}",
+    ["ingame.complete"] = "验收探针完成。",
+  },
+}
+
+-- Replace "{name}" placeholders from args, leaving an unmatched one intact so a
+-- Lua nil can NEVER reach a printed line.  Plain byte gsub; no utf8.*.
+local function substitute(text, args)
+  if type(text) ~= "string" then
+    return text
+  end
+  return (text:gsub("{([%w_]+)}", function(name)
+    local value = args[name]
+    if value == nil then
+      return "{" .. name .. "}"
+    end
+    return tostring(value)
+  end))
+end
+
+-- tr(key, args) -> the sentence for `key` in the ACTIVE language.  Never raises
+-- and never returns nil: an unknown language falls back to English, and an
+-- unknown key returns the key itself (a visible, greppable gap).
+local function tr(key, args)
+  local code = DEFAULT_LANGUAGE
+  if i18n ~= nil then
+    local active = i18n.get_language()
+    if type(active) == "string" then
+      code = active
+    end
+  end
+  local table_for_language = L10N[code] or L10N[DEFAULT_LANGUAGE]
+  local text = table_for_language[key]
+  if type(text) ~= "string" then
+    text = L10N[DEFAULT_LANGUAGE][key]
+  end
+  if type(text) ~= "string" then
+    return key
+  end
+  if type(args) ~= "table" then
+    args = {}
+  end
+  return substitute(text, args)
 end
 
 -- ---------------------------------------------------------------------------
@@ -133,7 +253,7 @@ end
 local ok_ccnbs, ccnbs = pcall(require, "ccnbs")
 if not ok_ccnbs or type(ccnbs) ~= "table" then
   emit("INGAME status=no-library error=" .. token(ccnbs))
-  print("未找到 ccnbs 模块。请先运行安装器（installer.lua）完成安装。")
+  print(tr("ingame.no_library"))
   finish(2)
   return
 end
@@ -152,12 +272,12 @@ end
 local speakers = ccnbs.discover_speakers()
 local speaker_count = #speakers
 emit("INGAME speakers=" .. tostring(speaker_count))
-print("检测到扬声器：" .. tostring(speaker_count) .. " 个。")
+print(tr("ingame.speakers", { count = tostring(speaker_count) }))
 
 if speaker_count == 0 then
   emit("INGAME status=no-speaker")
-  print("未检测到扬声器外设：请把扬声器贴在电脑的某一侧（如 back/left/right），")
-  print("用 `peripheral.getNames()` 能看到它之后再重试。")
+  print(tr("ingame.no_speaker.a"))
+  print(tr("ingame.no_speaker.b"))
   finish(1)
   return
 end
@@ -167,7 +287,7 @@ end
 -- ---------------------------------------------------------------------------
 if song_path == nil then
   if type(read) == "function" then
-    write("请输入 .nbs 文件路径（例如 /songs/mysong.nbs）：")
+    write(tr("ingame.prompt"))
     local answer = read()
     if type(answer) == "string" and answer ~= "" then
       song_path = answer
@@ -177,7 +297,7 @@ end
 
 if song_path == nil then
   emit("INGAME status=missing-argument")
-  print("未提供歌曲路径。用法：ingame.lua [--harness] [--result=文件] <歌曲.nbs>")
+  print(tr("ingame.missing_argument"))
   finish(1)
   return
 end
@@ -206,7 +326,7 @@ end
 
 if type(bytes) ~= "string" or bytes == "" then
   emit("INGAME status=missing-file path=" .. token(song_path))
-  print("找不到或无法读取文件：" .. token(song_path))
+  print(tr("ingame.missing_file", { path = token(song_path) }))
   finish(1)
   return
 end
@@ -218,7 +338,7 @@ if not decoded.ok then
     code = tostring(decoded.error.code)
   end
   emit("INGAME status=decode-failed error=" .. token(code))
-  print("解码失败，错误码：" .. token(code))
+  print(tr("ingame.decode_failed", { code = token(code) }))
   finish(2)
   return
 end
@@ -283,7 +403,7 @@ end)
 
 if not ok_play or session == nil then
   emit("INGAME status=play-error error=" .. token(play_error))
-  print("播放失败：" .. token(play_error))
+  print(tr("ingame.play_failed", { error = token(play_error) }))
   finish(3)
   return
 end
@@ -321,5 +441,5 @@ for index = 1, #warn_codes do
   emit("INGAME warncode=" .. token(warn_codes[index]))
 end
 
-print("验收探针完成。")
+print(tr("ingame.complete"))
 finish(0)
