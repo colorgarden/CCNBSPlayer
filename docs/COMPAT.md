@@ -241,6 +241,10 @@ playSound 又发别的声音」）**对 CraftOS-PC 正确，对现代 CC:T 偏�
 `tests/tier2/pitch_probe.lua` 输出到 `<temp>\computer\0\result.txt`，退出码 0，末尾 `STATUS ok`。
 以下为**逐字复制**的原始输出：
 
+> 说明：下方 `PROBE methods=...` 一行列出了仿真扬声器**对外暴露的全部方法**（平台能力清单），
+> 其中包含 `playAudio` 等音频缓冲接口。**本项目不使用这些接口**——CCNBSPlayer 属于
+> 音符调度方案，只调用 `playNote` / `playSound`。此处保留原文仅为记录平台 API 表面。
+
 ```
 == ENVIRONMENT ==
 PROBE version=1 side=back
