@@ -17,6 +17,9 @@
 --     play_sound_notes_at_peak integer  peak-window notes classified "play_sound"
 --     has_extended_range       boolean  true when ANY key is outside 33..57
 --     min_key, max_key         integer  over all notes (0 and 0 when there are none)
+--     all_notes_custom         boolean  true when the song has notes but NONE of
+--                                        them classify as vanilla/play_sound --
+--                                        i.e. every note is refused at playback
 --     loop = { loop, max_loop_count, loop_start_tick }  copied from the header
 --
 -- This module is a PURE function: it reads no clock, touches no peripheral, does
@@ -77,6 +80,7 @@
 -- utf8.*, no math.maxinteger, no collectgarbage, no string.dump, no os.exit.
 
 local instrument_table = require("nbs.instrument_table")
+local mapping = require("player.mapping")
 
 local analyze = {}
 
@@ -84,8 +88,10 @@ local analyze = {}
 local PEAK_WINDOW_MS = 50
 
 -- Native two-octave key range (33 = F#3, 45 = F#4, 57 = F#5), inclusive.
-local RANGE_MIN_KEY = 33
-local RANGE_MAX_KEY = 57
+-- The NUMBERS are owned in ONE place: player/mapping.lua's public
+-- NATIVE_MIN_KEY / NATIVE_MAX_KEY.  Referencing them here keeps the analyzer's
+-- extended-range boundary identical to the mapping the player uses;
+-- mapping.lua requires nothing, so this creates no require cycle.
 
 -- analyze.analyze(song) -> result
 function analyze.analyze(song)
@@ -96,12 +102,18 @@ function analyze.analyze(song)
   local ticks_per_second = header.tempo_ticks_per_second
   local tick_ms = 1000 / ticks_per_second
 
-  -- Key range + extended-range scan, over ALL notes (independent of the window).
+  -- Key range + extended-range scan + playable-note count, over ALL notes
+  -- (independent of the 50 ms window).
   local min_key = 0
   local max_key = 0
   local has_extended_range = false
+  -- How many notes the player can actually schedule (vanilla or play_sound).
+  -- A note that is neither is a custom instrument, refused at playback; when
+  -- this stays 0 on a non-empty song the whole song is silent.
+  local playable_notes = 0
   for index = 1, total_notes do
-    local key = notes[index].key
+    local note = notes[index]
+    local key = note.key
     if index == 1 then
       min_key = key
       max_key = key
@@ -113,8 +125,13 @@ function analyze.analyze(song)
         max_key = key
       end
     end
-    if key < RANGE_MIN_KEY or key > RANGE_MAX_KEY then
+    if key < mapping.NATIVE_MIN_KEY or key > mapping.NATIVE_MAX_KEY then
       has_extended_range = true
+    end
+    local bucket = instrument_table.bucket_of(note.instrument,
+      header.vanilla_instrument_count)
+    if bucket == "vanilla" or bucket == "play_sound" then
+      playable_notes = playable_notes + 1
     end
   end
 
@@ -183,6 +200,11 @@ function analyze.analyze(song)
     has_extended_range = has_extended_range,
     min_key = min_key,
     max_key = max_key,
+    -- True for a non-empty song in which EVERY note is refused at playback
+    -- (custom instrument ids).  A plain boolean, derived from the whole song --
+    -- NOT from the peak window, whose buckets can be 0/0 for a song that still
+    -- has playable notes elsewhere.
+    all_notes_custom = total_notes > 0 and playable_notes == 0,
     loop = {
       loop = header.loop,
       max_loop_count = header.max_loop_count,

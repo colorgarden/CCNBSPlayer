@@ -307,6 +307,38 @@ describe("nbs.analyze instrument buckets", function()
   end)
 end)
 
+describe("nbs.analyze all-custom detection", function()
+  it("21. a song whose EVERY note is a custom instrument reports all_notes_custom", function()
+    local result = analyze.analyze(song({
+      vic = 16,
+      notes = { n(0, 16, 45), n(1, 17, 45), n(2, 20, 45) },
+    }))
+
+    expect.equal(result.all_notes_custom, true)
+    expect.equal(result.vanilla_notes_at_peak, 0)
+    expect.equal(result.play_sound_notes_at_peak, 0)
+    io.write("    CASE21 all-custom=" .. tostring(result.all_notes_custom) .. "\n")
+  end)
+
+  it("21b. a single playable note ANYWHERE (not just at the peak) makes it false", function()
+    -- The custom note sits at tick 0 (the earliest, and therefore the reported
+    -- peak window); the vanilla note sits later.  The PEAK buckets are 0/0, but
+    -- the song is NOT all-custom, so the flag must still be false.
+    local result = analyze.analyze(song({
+      vic = 16,
+      notes = { n(0, 16, 45), n(5, 0, 45) },
+    }))
+
+    expect.equal(result.vanilla_notes_at_peak, 0)
+    expect.equal(result.all_notes_custom, false)
+  end)
+
+  it("21c. an empty song is not all-custom", function()
+    local result = analyze.analyze(song({ notes = {} }))
+    expect.equal(result.all_notes_custom, false)
+  end)
+end)
+
 describe("nbs.analyze extended range", function()
   it("9. a low key out of range", function()
     local result = analyze.analyze(song({ notes = { n(0, 1, 20) } }))

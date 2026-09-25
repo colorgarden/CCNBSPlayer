@@ -69,8 +69,10 @@
 
 local mapping = {}
 
--- The boundaries of the native NBS key range (a two-octave window).  Exposed so
--- the warning layer and tests share one definition.  These are NOT clamp bounds
+-- The boundaries of the native NBS key range (a two-octave window).  This is the
+-- AUTHORITATIVE definition: nbs/analyze.lua references these two values for its
+-- extended-range boundary, and tests/player/mapping_spec.lua pins them, so there
+-- is exactly ONE copy of 33 / 57 in the codebase.  These are NOT clamp bounds
 -- for pitch_semitones -- see the module header.
 mapping.NATIVE_MIN_KEY = 33
 mapping.NATIVE_MAX_KEY = 57
