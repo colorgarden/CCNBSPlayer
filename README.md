@@ -47,13 +47,62 @@
 wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua
 ```
 
-安装器会把运行所需的全部文件下载并放到 `/lib/` 下。成功后终端会打印一段中文横幅，并告诉
-你用法。安装器是**幂等**的：重复运行会干净地覆盖旧文件，不会破坏既有安装。
+安装器会先问你**从哪个来源下载**（见下一节），然后**下载界面框架**，接着弹出一个**图形安装
+界面**（基于 Basalt 2）：
 
-### 网络不好 / `raw.githubusercontent.com` 连不上（镜像源）
+- 顶部标题，中间状态与进度条（带百分比）
+- 一个**来源列表**，可在开始前切换下载源
+- 按钮：`开始安装` → 下载（进度条实时走动）→ `写入` → `重启` / `稍后`
+- 一个 **`开机自启动：开/关`** 开关
 
-安装器**默认会自动切换镜像源**，你什么都不用做。它按顺序尝试以下来源，**用第一个能答上
-的来源完成整次安装**（不会东拼一点西拼一点）：
+下载**全部在内存中完成**，只有你点 `写入` 才会真正落盘，所以中途失败不会留下装了一半的目录。
+安装器是**幂等**的：重复运行会干净地覆盖旧文件，不会破坏既有安装。
+
+> 界面需要图形框架，若框架下载失败，安装器会**自动退回纯文字安装**，不会让你面对一片空白。
+
+### 开机自启动（可选）
+
+图形界面里有一个 `开机自启动：开/关` 开关，默认**关**。打开后，安装器会在**根目录**写一个
+`startup.lua` —— CC 会在电脑开机时自动执行它，从而直接进入播放器。
+
+| 情况 | 安装器的行为 |
+|---|---|
+| 根目录没有 `startup.lua`，你选了开 | 写入 |
+| 已有的是**它自己写的**（带标记） | 覆盖（重跑即更新） |
+| 已有的是**你自己的** | **绝不覆盖**，只提示你，让你自己决定怎么合并 |
+| 你选了关，而文件是它写的 | 删除（重跑安装器即可干净关闭自启） |
+| 你选了关，而文件是你自己的 | 不动 |
+
+> **它不会碰别人的 `startup.lua`。** 直接覆盖会毁掉你机器上无关的启动配置，比"没装自启"
+> 严重得多，所以这条是硬规则。
+
+命令行方式（非交互，适合 CI 或脚本）：
+
+| 参数 | 作用 |
+|---|---|
+| `--autostart` | 开启自启（等价于把开关打开） |
+| `--no-autostart` | 关闭自启（仅删除**它自己写的**那个文件） |
+| 都不给 | **不做任何改动** —— "没有表态"不等于"关掉"，所以不会动你已有的自启 |
+
+### 下载来源（镜像源）
+
+安装器**会先让你选下载来源**。引导阶段（此时图形框架还没下载下来）是一个编号菜单：
+
+```text
+请选择下载来源：
+  0. 自动（按顺序尝试，推荐）
+  1. github   https://raw.githubusercontent.com/...
+  2. ghproxy  https://ghproxy.net/...
+  ...
+```
+
+直接回车 = 自动；也可以输入编号或名称。选定后，**整次安装的所有文件都来自这一个来源**，绝不
+东拼一点西拼一点。
+
+进入图形界面后，来源会以**列表**形式显示，你可以在点 `开始安装` **之前**换一个；一旦开始
+下载就锁定。若你在命令行已经用 `--mirror` 指定了来源，则不会再问你，界面里也不能改动。
+
+以下是「自动」模式下按顺序尝试的来源：
 
 | 顺序 | 名称 | 地址 |
 |---|---|---|
@@ -70,19 +119,19 @@ wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installe
 **为什么 jsDelivr 排最后**：它是唯一**会缓存**的来源——按分支缓存，可能长达数小时。刚推
 的提交在它上面可能还看不到，过期的清单会让你装到旧文件列表，所以只当最后手段。
 
-需要手动控制时：
+需要绕过交互时：
 
 ```text
-wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua --list-mirrors
-wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua --mirror ghfast
-wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua --mirror https://自定义镜像/前缀
-wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installer.lua --no-mirror
+wget run .../installer.lua --list-mirrors
+wget run .../installer.lua --mirror ghfast
+wget run .../installer.lua --mirror https://自定义镜像/前缀
+wget run .../installer.lua --no-mirror
 ```
 
 | 参数 | 作用 |
 |---|---|
 | `--list-mirrors` | 列出所有可用来源后退出，不做安装 |
-| `--mirror <名称>` | **只用**该来源，不再自动回退 |
+| `--mirror <名称>` | **只用**该来源，不再自动回退，也不再询问 |
 | `--mirror <地址>` | 只用该地址（同样不回退） |
 | `--no-mirror` | 只用 GitHub 官方地址，完全不碰镜像 |
 
@@ -97,14 +146,18 @@ wget run https://raw.githubusercontent.com/colorgarden/CCNBSPlayer/main/installe
 /lib/ccnbs.lua            （库入口）
 /lib/ccnbsplayer.lua      （交互播放器）
 /lib/updater.lua          （更新器）
+/lib/installer.lua        （安装/更新引擎 + 更新器依赖）
 /lib/nbs/*.lua            （10 个解码/分析模块）
 /lib/player/*.lua         （9 个运行时模块）
 /lib/net/*.lua            （3 个网络模块）
-/lib/ui/*.lua             （4 个界面模块）
+/lib/ui/*.lua             （5 个界面模块）
 /lib/vendor/*.lua         （2 个第三方库，见「许可证」）
 ```
 
-共 31 个文件。复制完成后即可直接使用。
+共 33 个文件。复制完成后即可直接使用。
+
+> `installer.lua` 也在安装清单里，因为 `/lib/updater` 依赖它的逻辑（这是"更新"与"安装"
+> 不可能给出不同结果的原因）。
 
 > `vendor/` 里是随仓库分发的第三方库（Basalt 2 与 utf8display），**必须一起复制**，否则
 > 播放器无法启动。字体**不在**其中，由程序在运行时自行下载（见下文「中文显示」）。
