@@ -674,3 +674,70 @@ describe("tui scripted-event harness", function()
     io.write("    CASE12 injected_only ok=" .. tostring(ok) .. "\n")
   end)
 end)
+
+-- ---------------------------------------------------------------------------
+-- 13. A custom-only song with ZERO speakers is explained, not silent
+-- ---------------------------------------------------------------------------
+-- Custom-instrument notes are refused at playback, so a song made ONLY of them
+-- makes no sound.  With speakers attached ccnbs reports the refusal summary at
+-- the end; with NO speaker attached the custom events are never routed, so that
+-- summary never fires and the user would hear nothing with no explanation.  The
+-- TUI must surface the load-time diagnostic itself.
+-- ---------------------------------------------------------------------------
+
+describe("tui custom-only with zero speakers", function()
+  it("13. writes a custom-instrument diagnostic instead of silent playback", function()
+    local vclock = clock.new_virtual(0)
+    local out, write = new_capture()
+
+    -- decode is stubbed to hand the TUI an all-custom song without a bespoke
+    -- .nbs fixture; analyze and play stay REAL, so the diagnostic is exercised
+    -- end to end through the real library.
+    local saved_decode = ccnbs.decode
+    ccnbs.decode = function()
+      return {
+        ok = true,
+        song = {
+          header = {
+            name = "allcustom",
+            tempo_ticks_per_second = 10,
+            vanilla_instrument_count = 16,
+          },
+          layers = {},
+          notes = {
+            { tick = 0, layer = 0, instrument = 16, key = 45,
+              velocity = 100, panning = 100, pitch = 0 },
+            { tick = 1, layer = 0, instrument = 17, key = 45,
+              velocity = 100, panning = 100, pitch = 0 },
+          },
+          custom_instruments = {},
+        },
+      }
+    end
+
+    local steps = {
+      { event = { "key", "enter" } },
+      { advance = 100000, event = { "key", "s" } },
+    }
+
+    local result
+    local ok = pcall(function()
+      result = tui.run({
+        files = { "allcustom.nbs" },
+        read_file = function() return "" end,
+        speakers = {},              -- ZERO speakers: the trigger for the defect
+        clock = vclock,
+        write = write,
+        pull = scripted(vclock, steps),
+      })
+    end)
+
+    ccnbs.decode = saved_decode
+
+    expect.equal(ok, true)
+    expect.equal(result.exit_code, 0)
+    expect.contains(joined(out), "custom-instrument")
+    io.write("    CASE13 exit=" .. tostring(result.exit_code)
+      .. " text=\"" .. joined(out):gsub("\n", " | ") .. "\"\n")
+  end)
+end)

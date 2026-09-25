@@ -96,6 +96,11 @@ local tui = {}
 -- The bare code for the load-time extended-range property.
 local CODE_EXTENDED_RANGE = "extended-range"
 
+-- The bare code for "the song contains custom instruments that are refused".
+-- Emitted load-time when a custom-only song has NO speaker to route them to;
+-- ccnbs emits the same code at the end of playback when speakers DO exist.
+local CODE_CUSTOM_INSTRUMENT = "custom-instrument"
+
 -- ---------------------------------------------------------------------------
 -- Defensive resolution of the (concurrently written) warning renderer
 -- ---------------------------------------------------------------------------
@@ -231,6 +236,10 @@ local function normalize_key(raw)
   if type(raw) == "number" then
     local keys = rawget(_G, "keys")
     if type(keys) == "table" then
+      -- `pairs` is SAFE here: the matched name is only ever compared for
+      -- equality against a fixed key set by the caller (up/down/enter/space/
+      -- s/q/...).  Nothing is emitted or accumulated from this walk, so its
+      -- iteration order cannot affect any output.
       for name, code in pairs(keys) do
         if code == raw then
           return tostring(name):lower()
@@ -620,6 +629,16 @@ function tui.run(opts)
         min_key = analysis.min_key,
         max_key = analysis.max_key,
       })
+    end
+
+    -- A song made ONLY of custom-instrument notes is silent by construction:
+    -- those notes are refused at playback, so none ever reaches a speaker.
+    -- With speakers attached, ccnbs reports that refusal at the end; with NO
+    -- speaker attached the custom events are never routed, so the summary never
+    -- fires.  Surface the reason here so the user is not left with unexplained
+    -- silence.
+    if analysis.all_notes_custom and #speakers == 0 then
+      sink.report(CODE_CUSTOM_INSTRUMENT, { count = analysis.total_notes })
     end
 
     -- ---- start playback through ccnbs.play ------------------------------
