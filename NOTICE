@@ -28,7 +28,7 @@ than fetched at runtime because Basalt's modules resolve each other through
 `require`, which does not work from a directory that is not on `package.path`.
 See `vendor/README.md` for the provenance and how to verify it.
 
-4. Basalt 2 (fork build) - https://github.com/HKXingluo/Basalt2
+1. Basalt 2 (fork build) - https://github.com/HKXingluo/Basalt2
    A fork of Basalt 2 - https://github.com/Pyroxenium/Basalt2
    Copyright (c) 2025 Pyroxenium (upstream); fork maintained by HKXingluo
    Licensed under the MIT License. Full text: `vendor/LICENSE-Basalt2`.
@@ -45,7 +45,7 @@ See `vendor/README.md` for the provenance and how to verify it.
    5a273409fce6baaa89ae17d72332f4ad6e3c4232c3e3e426276cdbfa33a6d538).
    Used for: the entire user interface framework, including the installer's GUI.
 
-5. ComputerCraft-Utf8 (`utf8display`) - https://git.liulikeji.cn/xingluo/ComputerCraft-Utf8
+2. ComputerCraft-Utf8 (`utf8display`) - https://git.liulikeji.cn/xingluo/ComputerCraft-Utf8
    Copyright (c) the ComputerCraft-Utf8 author (xingluo / HKXingluo)
    LICENSING POSITION - PLEASE READ: this component declares NO LICENSE of its
    own. Its repository contains no LICENSE, COPYING or NOTICE file, and its
@@ -60,11 +60,29 @@ See `vendor/README.md` for the provenance and how to verify it.
    Vendored as: `vendor/utf8display.lua`.
    Used for: drawing CJK glyphs as bitmaps, because a stock CC:Tweaked terminal
    has no CJK font.
+3. MPlayer icon set - https://git.liulikeji.cn/xingluo/MPlayer
+   Copyright (c) the MPlayer author (xingluo / HKXingluo)
+   Licensed under the GNU General Public License version 2 (GPL-2.0); the
+   repository's LICENSE file is the GPL-2.0 text and its README states the
+   licence explicitly. This project is also GPL-2.0, so the icons may be
+   redistributed here.
+   WHAT IS COPIED: the 35 icon files under `src/icons/`, unmodified. Each is pure
+   DATA -- a Lua chunk returning a bimg bitmap that Basalt's `setImage` accepts:
+       return {
+       {"\135\151\144\139","BQBB","QBQQ"},
+       ...
+       }
+   They are assets, not logic, so copying them copies artwork rather than
+   re-implementing behaviour. MPlayer draws its buttons with icons instead of
+   text, and this project's interface follows that design.
+   Vendored as: `vendor/mplayer-icons/` (35 files, 4,607 bytes total).
+   Used for: every icon button and icon label in the interface.
+
 
 
 Third-party components (NOT committed; obtained at runtime)
 -----------------------------------------------------------
-6. Fusion Pixel Font - https://github.com/TakWolf/fusion-pixel-font
+4. Fusion Pixel Font - https://github.com/TakWolf/fusion-pixel-font
    Copyright (c) TakWolf
    Licensed under the MIT License.
    NOT distributed with this repository. The font is downloaded onto the user's
@@ -73,15 +91,19 @@ Third-party components (NOT committed; obtained at runtime)
    the font cannot be stored alongside the program on a default server. This is
    the same approach MPlayer takes.
 
-7. MPlayer - https://git.liulikeji.cn/xingluo/MPlayer
+5. MPlayer - https://git.liulikeji.cn/xingluo/MPlayer
    Copyright (c) the MPlayer author (xingluo / HKXingluo)
    Licensed under the GNU General Public License version 2 (GPL-2.0); the
    repository's LICENSE file is the GPL-2.0 text and its README states the
    license explicitly.
-   NOT distributed with this repository and no source copied from it. Credited
-   because (a) this project's UI architecture and its Chinese-rendering approach
-   follow MPlayer's, and (b) MPlayer is the GPL-2.0 work through which
-   `utf8display` (item 5 above) reaches this project.
+   WHAT IS COPIED: only the icon set, as item 6 above. MPlayer's PROGRAM CODE is
+   NOT distributed with this repository and no logic was copied from it: its
+   screen is built around NetEase music, QR login, IME input and lyrics, none of
+   which this project has. What this project took from MPlayer is its interface
+   DESIGN -- the dark palette, the top bar, the scrolling home sections, the
+   playback bar -- reimplemented over Note Block World, plus the icon assets.
+   Credited also because MPlayer is the GPL-2.0 work through which `utf8display`
+   (item 5 above) and the Basalt fork (item 4 above) reach this project.
 
 
 The project's own code
@@ -101,18 +123,18 @@ attributions are retained here because the project depends on them during
 development, and because anyone who obtains the test suite separately should see
 where its input came from.
 
-8. pynbs - https://github.com/OpenNBS/pynbs
+6. pynbs - https://github.com/OpenNBS/pynbs
    Copyright (c) Open Note Block Studio contributors
    Licensed under the MIT License.
    Used for: .nbs test fixtures and their parsed-output golden snapshots, as
    well as the minimal legacy/current song goldens.
 
-9. nbs.js - https://github.com/OpenNBS/nbs.js
+7. nbs.js - https://github.com/OpenNBS/nbs.js
    Copyright (c) Open Note Block Studio contributors
    Licensed under the MIT License.
    Used for: the version 6 test fixture and its documented expected values.
 
-10. Open Note Block Studio - https://github.com/OpenNBS/NoteBlockStudio
+8. Open Note Block Studio - https://github.com/OpenNBS/NoteBlockStudio
     Copyright (c) Open Note Block Studio contributors
     Licensed under the MIT License.
     Used for: the upstream demo songs that the above fixtures are derived from.
