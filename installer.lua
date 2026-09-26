@@ -290,11 +290,8 @@ installer.RUNTIME_FILES = {
   "net/http.lua",
   "net/nbw.lua",
   "net/zip.lua",
-  "ui/basalt_app.lua",
   "ui/cjk.lua",
   "ui/i18n.lua",
-  "ui/installer_app.lua",
-  "ui/presenter.lua",
   "vendor/basalt.lua",
   "vendor/utf8display.lua",
   "ui/icons.lua",
@@ -1203,6 +1200,134 @@ end
 --                                          | { ok = false, code = <string>,
 --                                              message = <string> }
 --
+-- ---------------------------------------------------------------------------
+-- Shrinking what gets installed -- and why it is REQUIRED, not an optimisation
+-- ---------------------------------------------------------------------------
+-- A CC:Tweaked computer's default disk holds 1,000,000 bytes.  This project's
+-- sources are comment-heavy and were measured at 1,123,336 bytes installed --
+-- 123 KB OVER the limit, so the install did not merely waste space, it could not
+-- fit at all.
+--
+-- The reference implementation solves this the same way: its release artifacts
+-- are minified by tools/minify.lua before shipping (its 9,545-line source becomes
+-- a 232 KB bundle), and it does NOT install its own installer.  Both lessons are
+-- applied here:
+--
+--   * `shrink_for_install` minifies OUR OWN Lua as it is written;
+--   * vendored third-party source is NEVER touched -- it is redistributed
+--     verbatim, its comments carry its attribution, and one of the bundles
+--     embeds its own string tables;
+--   * the files that exist only DURING an installation are no longer installed.
+
+-- installer.minify_lua(source) -> string | nil
+--
+-- Removes comments and nothing else.  Deliberately NOT a whitespace compressor:
+-- every newline is preserved where a comment was, so two lines are never joined
+-- and the result cannot change meaning.  That restraint is what makes this safe
+-- enough to run on a user's machine -- a large part of the saving is comments
+-- alone, and a compressor clever enough to also fold whitespace is clever enough
+-- to corrupt a file.
+function installer.minify_lua(source)
+  if type(source) ~= "string" or source == "" then
+    return nil
+  end
+
+  local out = {}
+  local index = 1
+  local length = #source
+
+  while index <= length do
+    local char = source:sub(index, index)
+
+    -- A long bracket here opens either a long STRING (kept verbatim) or a long
+    -- COMMENT (dropped).  Both start with `[` `=`* `[`, and a long string is the
+    -- only thing in Lua that can contain a newline, so it must be consumed whole
+    -- or the line handling below would corrupt it.
+    local equals = source:match("^%[(=*)%[", index)
+    if equals ~= nil then
+      local close = "]" .. equals .. "]"
+      local finish = source:find(close, index + #equals + 2, true)
+      if finish == nil then
+        out[#out + 1] = source:sub(index)
+        break
+      end
+      out[#out + 1] = source:sub(index, finish + #close - 1)
+      index = finish + #close
+
+    elseif char == "-" and source:sub(index + 1, index + 1) == "-" then
+      local long_equals = source:match("^%-%-%[(=*)%[", index)
+      if long_equals ~= nil then
+        local close = "]" .. long_equals .. "]"
+        local finish = source:find(close, index + #long_equals + 4, true)
+        index = finish and (finish + #close) or (length + 1)
+      else
+        -- A line comment: drop to the newline but KEEP the newline.
+        local newline = source:find("\n", index, true)
+        index = newline or (length + 1)
+      end
+
+    elseif char == '"' or char == "'" then
+      local scan = index + 1
+      while scan <= length do
+        local inner = source:sub(scan, scan)
+        if inner == "\\" then
+          scan = scan + 2
+        elseif inner == char or inner == "\n" then
+          break
+        else
+          scan = scan + 1
+        end
+      end
+      local stop = math.min(scan, length)
+      out[#out + 1] = source:sub(index, stop)
+      index = stop + 1
+
+    else
+      out[#out + 1] = char
+      index = index + 1
+    end
+  end
+
+  local result = table.concat(out)
+  if result == source then
+    return nil
+  end
+  return result
+end
+
+-- installer.shrink_for_install(path, body) -> string
+--
+-- Returns what should actually be WRITTEN.  Falls back to the original body on
+-- every doubt, because a corrupted file ships a program that does not start, and
+-- the saving is never worth that.
+function installer.shrink_for_install(path, body)
+  if type(body) ~= "string" or type(path) ~= "string" then
+    return body
+  end
+  if path:sub(-4) ~= ".lua" then
+    return body
+  end
+  if path:sub(1, 7) == "vendor/" then
+    return body
+  end
+
+  local minified = installer.minify_lua(body)
+  if type(minified) ~= "string" or #minified >= #body then
+    return body
+  end
+
+  -- Prove it still compiles before trusting it.
+  local compile = rawget(_G, "load")
+  if type(compile) ~= "function" then
+    return body
+  end
+  local ok, chunk = pcall(compile, minified, "=shrunk", "t")
+  if not ok or chunk == nil then
+    return body
+  end
+  return minified
+end
+
 -- The SINGLE-FILE half of install(): it writes ONE already-downloaded body to
 -- its target.  Seam-driven (only the injected `fs` is touched) and it NEVER
 -- raises -- a broken injected seam comes back as a typed failure.  This is the
@@ -1221,6 +1346,10 @@ function installer.write_one(fs, entry, body, ctx)
   local installed = tonumber(ctx.installed) or 0
   local total = tonumber(ctx.total) or 1
   local target = tostring(entry.target)
+
+  -- SHRINK FIRST, so the space check below measures what will actually be
+  -- written rather than a size that will never reach the disk.
+  body = installer.shrink_for_install(tostring(entry.repo_path or target), body)
 
   -- Whatever already occupies the target is classified here, and the OVERWRITE
   -- POLICY is asked -- never re-implemented -- because installer.should_overwrite

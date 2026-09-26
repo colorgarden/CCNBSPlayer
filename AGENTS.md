@@ -63,6 +63,20 @@ Measured examples of trusting the wrong thing:
 
 ## 3. PROJECT CONSTRAINTS (hard, checked by the gate)
 
+* **THE DISK LIMIT IS A DESIGN CONSTRAINT, NOT A DETAIL.** A default CC:Tweaked
+  computer holds **1,000,000 bytes**. This project's sources measured
+  **1,123,336 B** installed — 123 KB OVER, so the install did not merely waste
+  space, it **could not fit**. The reference implementation had already solved
+  this and the lesson was recorded in its `release/` artifacts, not its docs:
+  1. it **minifies** what it ships (9,545 lines of source become a 232 KB bundle),
+     and
+  2. it **does not install its own installer**.
+  This project now does both. `installer.shrink_for_install` strips comments from
+  OUR OWN Lua as it is written (measured 1,128,115 → 777,036 B) and **never
+  touches `vendor/**`**, whose comments carry upstream attribution. The install
+  now costs ~720 KB, leaving ~280 KB for the user's songs.
+  **Before adding a module, measure the install. Any change that pushes it past
+  1,000,000 B ships something that cannot be installed.**
 * **Language subset** — CC:Tweaked Cobalt, Lua 5.2 base. FORBIDDEN in our code:
   `//`, bitwise operators, `math.maxinteger`, `collectgarbage`, `string.dump`,
   `os.exit`, `goto`. `lua tests/lint.lua` must exit 0.

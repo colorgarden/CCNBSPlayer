@@ -50,11 +50,8 @@ net/zip.lua
 
 # UI layer: the Basalt app entry point, the i18n tables, the installer's Basalt
 # view and the presentation logic.
-ui/basalt_app.lua
 ui/cjk.lua
 ui/i18n.lua
-ui/installer_app.lua
-ui/presenter.lua
 
 # Vendored third-party bundles the runtime loads (see vendor/README.md).
 vendor/basalt.lua
