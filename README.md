@@ -1,3 +1,18 @@
+> # ⚠️ 本项目已归档（只读）
+>
+> **这个仓库不再维护。** 它曾经是一个带图形界面的播放器应用；项目方向改变后，界面、
+> 安装器与网络层都被删除，代码变成了一个**库**，并迁到了新仓库：
+>
+> ## 👉 [**colorgarden/CCNBSLib**](https://github.com/colorgarden/CCNBSLib)
+>
+> 新仓库保留了本仓库的**完整提交历史**。区别只有一个：那边没有界面——只有
+> 「字节 → 乐谱 → 分析 → 事件流 → 扬声器调用」这条流水线，入口是
+> `require("ccnbslib")`。
+>
+> 这里的代码**不会**收到修复。请到新仓库开 issue 或 PR。
+
+---
+
 # CCNBSPlayer
 
 在 [CC:Tweaked](https://tweaked.cc/) 电脑上播放 Note Block Studio `.nbs` 歌曲文件的音乐
